@@ -123,6 +123,7 @@ local markedPos = nil
 local markerPart = nil
 local tileSize = 10
 local spawningActive = true
+local BUILD_DELAY = 1
 
 --// Helper: Parse size
 local function getPlatformSize()
@@ -239,7 +240,7 @@ placeButton.MouseButton1Click:Connect(function()
 			)
 
 			buildRemote:FireServer("pallet", CFrame.new(pos))
-			task.wait(0.04)
+			task.wait(BUILD_DELAY)
 		end
 	end
 
