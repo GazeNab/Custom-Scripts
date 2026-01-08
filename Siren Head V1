@@ -121,10 +121,10 @@ placeButton.TextColor3 = Color3.new(1,1,1)
 local minimized = false
 local markedPos = nil
 local markerPart = nil
-local tileSize = 10
+local tileSize = 7
 local spawningActive = true
 local BUILD_DELAY = 1
-local SPAWN_HEIGHT = 5
+local SPAWN_HEIGHT = 10
 
 --// Helper: Parse size
 local function getPlatformSize()
