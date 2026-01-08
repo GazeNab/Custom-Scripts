@@ -1,4 +1,4 @@
---// LocalScript: Platform Builder (Compact GUI with proper Minimize, Trash, and Stop Button)
+--// LocalScript
 
 --// Services
 local Players = game:GetService("Players")
@@ -157,7 +157,7 @@ minimizeBtn.MouseButton1Click:Connect(function()
 end)
 
 ---------------------------------------------------------------------
--- Mark Area (CAMERA-BASED, aligned perfectly)
+-- Mark Area
 ---------------------------------------------------------------------
 markButton.MouseButton1Click:Connect(function()
 	spawningActive = true
@@ -209,7 +209,7 @@ stopSpawnBtn.MouseButton1Click:Connect(function()
 end)
 
 ---------------------------------------------------------------------
--- Place Platform (floor only)
+-- Place Platform 
 ---------------------------------------------------------------------
 placeButton.MouseButton1Click:Connect(function()
 	if not markedPos then
