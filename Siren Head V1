@@ -124,7 +124,7 @@ local markerPart = nil
 local tileSize = 6.8
 local spawningActive = true
 local BUILD_DELAY = 0.8
-local SPAWN_HEIGHT = 5
+local SPAWN_HEIGHT = 10
 
 --// Helper: Parse size
 local function getPlatformSize()
