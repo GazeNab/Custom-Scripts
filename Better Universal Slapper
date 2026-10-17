@@ -1,0 +1,1567 @@
+--[[  Admin Panel v5  ]]
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UIS          = game:GetService("UserInputService")
+
+local LocalPlayer  = Players.LocalPlayer
+local camera       = workspace.CurrentCamera
+
+local function tw(obj, props, t)
+    TweenService:Create(obj, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad), props):Play()
+end
+local function corner(p, r)
+    local c = Instance.new("UICorner", p); c.CornerRadius = UDim.new(0, r or 8); return c
+end
+local function mkStroke(p, col, thick)
+    local s = Instance.new("UIStroke", p)
+    s.Color = col or Color3.fromRGB(55,55,72); s.Thickness = thick or 1; return s
+end
+
+-- ══ STATE ══════════════════════════════════════════════════════════════════
+local playerStates    = {}
+local persistChecked  = {}
+local spectateTarget  = nil
+local spectateCharConn= nil
+local tpLoopConn      = nil
+local tpLoopActive    = false
+local tpDistance      = 4
+local searchQuery     = ""
+local playerRows      = {}
+local allSelected     = false
+local selectAllActive = false
+local firstCheckedPlayer = nil
+local checkOrder      = {}
+local slapX, slapY, slapZ = 50, 50, 50
+local autoSlapDelay   = 0.5
+local autoSlapActive  = false
+local autoSlapConn    = nil
+local noTpMode        = false
+local _dotVisible     = true
+local _dotTimer       = 0
+local _distTimer      = 0
+
+-- ── Clone mode state
+local cloneMode       = false
+
+-- ── Slam state
+local slamActive      = false
+local slamConn        = nil
+local slamWasAlive    = {}
+
+-- ── KL state
+local klActive        = false
+local klConn          = nil
+local klWasAlive      = {}
+
+-- ── Aim-info raycast state
+local aimTarget       = nil
+
+-- ══ DESTROY DUPLICATE ══════════════════════════════════════════════════════
+local pg = LocalPlayer:WaitForChild("PlayerGui")
+do local e = pg:FindFirstChild("AdminGUI_v5"); if e then e:Destroy() end end
+
+-- ══ GUI ════════════════════════════════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name="AdminGUI_v5"; gui.ResetOnSpawn=false
+gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder=999999
+gui.Parent=pg
+
+local PW = 300
+
+local panel = Instance.new("Frame")
+panel.Name="Panel"; panel.Size=UDim2.new(0,PW,0,100)
+panel.Position=UDim2.new(0,20,0,80)
+panel.BackgroundColor3=Color3.fromRGB(15,15,22)
+panel.BorderSizePixel=0; panel.Active=true; panel.Draggable=true
+panel.ClipsDescendants=true; panel.Parent=gui
+corner(panel,12); mkStroke(panel,Color3.fromRGB(42,42,60),1.5)
+
+-- ══ HEADER ═════════════════════════════════════════════════════════════════
+local HEADER_H = 46
+local header = Instance.new("Frame",panel)
+header.Size=UDim2.new(1,0,0,HEADER_H)
+header.BackgroundColor3=Color3.fromRGB(22,22,34)
+header.BorderSizePixel=0; header.ZIndex=3; corner(header,12)
+local hFix=Instance.new("Frame",header)
+hFix.Size=UDim2.new(1,0,0,12); hFix.Position=UDim2.new(0,0,1,-12)
+hFix.BackgroundColor3=Color3.fromRGB(22,22,34); hFix.BorderSizePixel=0; hFix.ZIndex=3
+
+local accent=Instance.new("Frame",header)
+accent.Size=UDim2.new(0,3,0,22); accent.Position=UDim2.new(0,10,0.5,-11)
+accent.BackgroundColor3=Color3.fromRGB(100,80,220); accent.BorderSizePixel=0; accent.ZIndex=4; corner(accent,2)
+
+local titleLbl=Instance.new("TextLabel",header)
+titleLbl.Size=UDim2.new(1,-110,1,0); titleLbl.Position=UDim2.new(0,22,0,0)
+titleLbl.BackgroundTransparency=1; titleLbl.Text="Admin Panel"
+titleLbl.TextColor3=Color3.fromRGB(230,228,255); titleLbl.Font=Enum.Font.GothamBold
+titleLbl.TextSize=14; titleLbl.TextXAlignment=Enum.TextXAlignment.Left; titleLbl.ZIndex=4
+
+local countPill=Instance.new("Frame",header)
+countPill.Size=UDim2.new(0,72,0,22); countPill.Position=UDim2.new(1,-140,0.5,-11)
+countPill.BackgroundColor3=Color3.fromRGB(18,36,22); countPill.BorderSizePixel=0; countPill.ZIndex=4
+corner(countPill,11); mkStroke(countPill,Color3.fromRGB(40,110,55),1.2)
+local onlineDot=Instance.new("Frame",countPill)
+onlineDot.Size=UDim2.new(0,7,0,7); onlineDot.Position=UDim2.new(0,7,0.5,-3)
+onlineDot.BackgroundColor3=Color3.fromRGB(60,220,90); onlineDot.BorderSizePixel=0; onlineDot.ZIndex=5; corner(onlineDot,4)
+local countLbl=Instance.new("TextLabel",countPill)
+countLbl.Size=UDim2.new(1,-18,1,0); countLbl.Position=UDim2.new(0,18,0,0)
+countLbl.BackgroundTransparency=1; countLbl.Text="0 online"
+countLbl.TextColor3=Color3.fromRGB(80,210,110); countLbl.Font=Enum.Font.GothamBold
+countLbl.TextSize=10; countLbl.TextXAlignment=Enum.TextXAlignment.Left; countLbl.ZIndex=5
+
+local function makeWinBtn(ox,bg,lbl)
+    local b=Instance.new("TextButton",header)
+    b.Size=UDim2.new(0,26,0,26); b.Position=UDim2.new(1,ox,0.5,-13)
+    b.BackgroundColor3=bg; b.Text=lbl; b.TextColor3=Color3.new(1,1,1)
+    b.Font=Enum.Font.GothamBold; b.TextSize=12; b.AutoButtonColor=false; b.ZIndex=5; corner(b,7)
+    return b
+end
+local minimizeBtn=makeWinBtn(-60,Color3.fromRGB(58,68,88),"─")
+local closeBtn=makeWinBtn(-30,Color3.fromRGB(175,48,48),"X")
+minimizeBtn.MouseEnter:Connect(function() tw(minimizeBtn,{BackgroundColor3=Color3.fromRGB(88,102,124)}) end)
+minimizeBtn.MouseLeave:Connect(function() tw(minimizeBtn,{BackgroundColor3=Color3.fromRGB(58,68,88)}) end)
+closeBtn.MouseEnter:Connect(function() tw(closeBtn,{BackgroundColor3=Color3.fromRGB(215,70,70)}) end)
+closeBtn.MouseLeave:Connect(function() tw(closeBtn,{BackgroundColor3=Color3.fromRGB(175,48,48)}) end)
+closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
+
+-- ══ AIM INFO BOX ═══════════════════════════════════════════════════════════
+local AIM_Y = HEADER_H + 8
+
+local aimBox = Instance.new("Frame", panel)
+aimBox.Size             = UDim2.new(1,-24,0,32)
+aimBox.Position         = UDim2.new(0,12,0,AIM_Y)
+aimBox.BackgroundColor3 = Color3.fromRGB(12,10,22)
+aimBox.BorderSizePixel  = 0
+corner(aimBox, 8)
+mkStroke(aimBox, Color3.fromRGB(55,35,110), 1.2)
+
+local aimIcon = Instance.new("TextLabel", aimBox)
+aimIcon.Size=UDim2.new(0,24,1,0); aimIcon.Position=UDim2.new(0,6,0,0)
+aimIcon.BackgroundTransparency=1; aimIcon.Text="👁"
+aimIcon.TextSize=13; aimIcon.Font=Enum.Font.Gotham
+
+local aimHint = Instance.new("TextLabel", aimBox)
+aimHint.Size=UDim2.new(0,40,1,0); aimHint.Position=UDim2.new(0,28,0,0)
+aimHint.BackgroundTransparency=1; aimHint.Text="AIM:"
+aimHint.TextColor3=Color3.fromRGB(80,55,140); aimHint.Font=Enum.Font.GothamBold
+aimHint.TextSize=10; aimHint.TextXAlignment=Enum.TextXAlignment.Left
+
+local aimNameLbl = Instance.new("TextLabel", aimBox)
+aimNameLbl.Size=UDim2.new(1,-72,1,0); aimNameLbl.Position=UDim2.new(0,68,0,0)
+aimNameLbl.BackgroundTransparency=1; aimNameLbl.Text="—"
+aimNameLbl.TextColor3=Color3.fromRGB(160,130,255); aimNameLbl.Font=Enum.Font.GothamBold
+aimNameLbl.TextSize=13; aimNameLbl.TextXAlignment=Enum.TextXAlignment.Left
+aimNameLbl.TextTruncate=Enum.TextTruncate.AtEnd
+
+-- ══ SEARCH ═════════════════════════════════════════════════════════════════
+local SEARCH_Y = AIM_Y + 32 + 6
+local SEARCH_H = 30
+
+local searchFrame=Instance.new("Frame",panel)
+searchFrame.Size=UDim2.new(1,-24,0,SEARCH_H); searchFrame.Position=UDim2.new(0,12,0,SEARCH_Y)
+searchFrame.BackgroundColor3=Color3.fromRGB(22,22,34); searchFrame.BorderSizePixel=0
+corner(searchFrame,8); mkStroke(searchFrame,Color3.fromRGB(50,50,72),1)
+
+local searchIcon=Instance.new("TextLabel",searchFrame)
+searchIcon.Size=UDim2.new(0,24,1,0); searchIcon.BackgroundTransparency=1
+searchIcon.Text="🔍"; searchIcon.TextSize=12; searchIcon.Font=Enum.Font.Gotham
+
+local searchBox=Instance.new("TextBox",searchFrame)
+searchBox.Size=UDim2.new(1,-30,1,-2); searchBox.Position=UDim2.new(0,24,0,1)
+searchBox.BackgroundTransparency=1; searchBox.Text=""
+searchBox.PlaceholderText="Search display name or @username..."
+searchBox.PlaceholderColor3=Color3.fromRGB(70,70,100)
+searchBox.TextColor3=Color3.fromRGB(210,210,240); searchBox.Font=Enum.Font.GothamMedium
+searchBox.TextSize=12; searchBox.TextXAlignment=Enum.TextXAlignment.Left
+searchBox.ClearTextOnFocus=false
+
+-- ══ FILTER ═════════════════════════════════════════════════════════════════
+local function playerMatchesQuery(plr, query)
+    if query=="" then return true end
+    local q=query:gsub("^@","")
+    return plr.DisplayName:lower():find(q,1,true)~=nil
+        or plr.Name:lower():find(q,1,true)~=nil
+end
+
+local function filterPlayerList()
+    for plr,row in pairs(playerRows) do
+        if row and row.Parent then
+            row.Visible=playerMatchesQuery(plr,searchQuery)
+        end
+    end
+end
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    searchQuery=searchBox.Text:lower(); filterPlayerList()
+end)
+
+-- ══ SELECT ALL ═════════════════════════════════════════════════════════════
+local SEL_ALL_Y = SEARCH_Y + SEARCH_H + 6
+
+local selAllBtn=Instance.new("TextButton",panel)
+selAllBtn.Size=UDim2.new(1,-24,0,26); selAllBtn.Position=UDim2.new(0,12,0,SEL_ALL_Y)
+selAllBtn.BackgroundColor3=Color3.fromRGB(30,26,52); selAllBtn.Text="☑  Select All Players"
+selAllBtn.TextColor3=Color3.fromRGB(160,145,230); selAllBtn.Font=Enum.Font.GothamBold
+selAllBtn.TextSize=12; selAllBtn.AutoButtonColor=false; corner(selAllBtn,7)
+local selAllStroke=mkStroke(selAllBtn,Color3.fromRGB(70,55,120),1.5)
+
+local selCountBadge=Instance.new("Frame",selAllBtn)
+selCountBadge.Size=UDim2.new(0,28,0,18); selCountBadge.Position=UDim2.new(1,-32,0.5,-9)
+selCountBadge.BackgroundColor3=Color3.fromRGB(180,50,50); selCountBadge.BorderSizePixel=0
+selCountBadge.Visible=false; corner(selCountBadge,9)
+local selCountLbl=Instance.new("TextLabel",selCountBadge)
+selCountLbl.Size=UDim2.new(1,0,1,0); selCountLbl.BackgroundTransparency=1
+selCountLbl.Text="0"; selCountLbl.TextColor3=Color3.new(1,1,1)
+selCountLbl.Font=Enum.Font.GothamBold; selCountLbl.TextSize=10
+
+selAllBtn.MouseEnter:Connect(function() tw(selAllBtn,{BackgroundColor3=Color3.fromRGB(42,36,72)}) end)
+selAllBtn.MouseLeave:Connect(function()
+    tw(selAllBtn,{BackgroundColor3=allSelected and Color3.fromRGB(38,22,72) or Color3.fromRGB(30,26,52)})
+end)
+
+-- ══ COLUMN HEADERS ═════════════════════════════════════════════════════════
+local COL_Y = SEL_ALL_Y + 26 + 6
+
+local function miniLbl(text,xOff,w,align)
+    local l=Instance.new("TextLabel",panel)
+    l.Size=UDim2.new(0,w,0,18); l.Position=UDim2.new(0,xOff,0,COL_Y)
+    l.BackgroundTransparency=1; l.Text=text
+    l.TextColor3=Color3.fromRGB(72,72,100); l.Font=Enum.Font.GothamMedium
+    l.TextSize=10; l.TextXAlignment=align or Enum.TextXAlignment.Left
+    return l
+end
+local colPlayerLbl=miniLbl("PLAYER",12,160)
+local colSelLbl=miniLbl("SEL",PW-68,28,Enum.TextXAlignment.Center)
+local colSpyLbl=miniLbl("SPY",PW-36,28,Enum.TextXAlignment.Center)
+
+local colDiv=Instance.new("Frame",panel)
+colDiv.Size=UDim2.new(1,-24,0,1); colDiv.Position=UDim2.new(0,12,0,COL_Y+18)
+colDiv.BackgroundColor3=Color3.fromRGB(35,35,52); colDiv.BorderSizePixel=0
+
+-- ══ SCROLL ═════════════════════════════════════════════════════════════════
+local SCROLL_Y=COL_Y+20
+local SCROLL_MAX_H=200
+local ROW_H=44
+
+local scroll=Instance.new("ScrollingFrame",panel)
+scroll.Name="PlayerScroll"; scroll.Position=UDim2.new(0,8,0,SCROLL_Y)
+scroll.Size=UDim2.new(1,-16,0,SCROLL_MAX_H)
+scroll.CanvasSize=UDim2.new(0,0,0,0)
+scroll.ScrollBarThickness=3
+scroll.ScrollBarImageColor3=Color3.fromRGB(80,78,115)
+scroll.BackgroundTransparency=1; scroll.BorderSizePixel=0
+scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y
+
+local listLayout=Instance.new("UIListLayout",scroll)
+listLayout.Padding=UDim.new(0,3); listLayout.SortOrder=Enum.SortOrder.LayoutOrder
+local listPad=Instance.new("UIPadding",scroll)
+listPad.PaddingTop=UDim.new(0,2); listPad.PaddingBottom=UDim.new(0,4)
+
+-- ══ BOTTOM SECTION ═════════════════════════════════════════════════════════
+local BTM_Y=SCROLL_Y+SCROLL_MAX_H+10
+
+local btmDiv=Instance.new("Frame",panel)
+btmDiv.Size=UDim2.new(1,-24,0,1); btmDiv.Position=UDim2.new(0,12,0,BTM_Y-6)
+btmDiv.BackgroundColor3=Color3.fromRGB(35,35,52); btmDiv.BorderSizePixel=0
+
+local function secLbl(text,y)
+    local l=Instance.new("TextLabel",panel)
+    l.Size=UDim2.new(1,-24,0,14); l.Position=UDim2.new(0,12,0,y)
+    l.BackgroundTransparency=1; l.Text=text
+    l.TextColor3=Color3.fromRGB(88,88,118); l.Font=Enum.Font.GothamBold
+    l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left
+    return l
+end
+
+local tpSecLbl=secLbl("TELEPORT TO ME",BTM_Y)
+
+local tpStatusRow=Instance.new("Frame",panel)
+tpStatusRow.Size=UDim2.new(1,-24,0,28); tpStatusRow.Position=UDim2.new(0,12,0,BTM_Y+16)
+tpStatusRow.BackgroundColor3=Color3.fromRGB(20,20,30); tpStatusRow.BorderSizePixel=0
+corner(tpStatusRow,7); mkStroke(tpStatusRow,Color3.fromRGB(38,38,56),1)
+
+local tpTargetLbl=Instance.new("TextLabel",tpStatusRow)
+tpTargetLbl.Size=UDim2.new(1,-148,1,0); tpTargetLbl.Position=UDim2.new(0,10,0,0)
+tpTargetLbl.BackgroundTransparency=1; tpTargetLbl.Text="No player selected"
+tpTargetLbl.TextColor3=Color3.fromRGB(90,90,120); tpTargetLbl.Font=Enum.Font.GothamMedium
+tpTargetLbl.TextSize=12; tpTargetLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local distPill=Instance.new("Frame",tpStatusRow)
+distPill.Size=UDim2.new(0,78,0,20); distPill.Position=UDim2.new(1,-144,0.5,-10)
+distPill.BackgroundColor3=Color3.fromRGB(14,14,26); distPill.BorderSizePixel=0
+corner(distPill,10); mkStroke(distPill,Color3.fromRGB(50,50,80),1.2)
+local distIcon=Instance.new("TextLabel",distPill)
+distIcon.Size=UDim2.new(0,18,1,0); distIcon.Position=UDim2.new(0,3,0,0)
+distIcon.BackgroundTransparency=1; distIcon.Text="📡"; distIcon.TextSize=10; distIcon.Font=Enum.Font.Gotham
+local distNumLbl=Instance.new("TextLabel",distPill)
+distNumLbl.Size=UDim2.new(1,-22,1,0); distNumLbl.Position=UDim2.new(0,20,0,0)
+distNumLbl.BackgroundTransparency=1; distNumLbl.Text="— st"
+distNumLbl.TextColor3=Color3.fromRGB(110,108,160); distNumLbl.Font=Enum.Font.GothamBold
+distNumLbl.TextSize=10; distNumLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local alivePill=Instance.new("Frame",tpStatusRow)
+alivePill.Size=UDim2.new(0,56,0,20); alivePill.Position=UDim2.new(1,-60,0.5,-10)
+alivePill.BackgroundColor3=Color3.fromRGB(14,14,26); alivePill.BorderSizePixel=0
+corner(alivePill,10); mkStroke(alivePill,Color3.fromRGB(50,50,80),1.2)
+local aliveDot=Instance.new("Frame",alivePill)
+aliveDot.Size=UDim2.new(0,7,0,7); aliveDot.Position=UDim2.new(0,6,0.5,-3)
+aliveDot.BackgroundColor3=Color3.fromRGB(80,80,110); aliveDot.BorderSizePixel=0; corner(aliveDot,4)
+local aliveStatusLbl=Instance.new("TextLabel",alivePill)
+aliveStatusLbl.Size=UDim2.new(1,-18,1,0); aliveStatusLbl.Position=UDim2.new(0,16,0,0)
+aliveStatusLbl.BackgroundTransparency=1; aliveStatusLbl.Text="—"
+aliveStatusLbl.TextColor3=Color3.fromRGB(110,108,160); aliveStatusLbl.Font=Enum.Font.GothamBold
+aliveStatusLbl.TextSize=10; aliveStatusLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+-- ══ SLIDER ═════════════════════════════════════════════════════════════════
+local SLIDER_SEC_Y=BTM_Y+50
+local sliderSecLbl=secLbl("TELEPORT DISTANCE",SLIDER_SEC_Y)
+
+local distValLbl=Instance.new("TextLabel",panel)
+distValLbl.Size=UDim2.new(0,40,0,14); distValLbl.Position=UDim2.new(1,-52,0,SLIDER_SEC_Y)
+distValLbl.BackgroundTransparency=1; distValLbl.Text=tostring(tpDistance).." st"
+distValLbl.TextColor3=Color3.fromRGB(140,140,200); distValLbl.Font=Enum.Font.GothamBold
+distValLbl.TextSize=10; distValLbl.TextXAlignment=Enum.TextXAlignment.Right
+
+local SLIDER_Y=SLIDER_SEC_Y+18
+local SLIDER_H=18; local SLIDER_MIN=1; local SLIDER_MAX=30
+
+local sliderTrack=Instance.new("Frame",panel)
+sliderTrack.Size=UDim2.new(1,-24,0,4); sliderTrack.Position=UDim2.new(0,12,0,SLIDER_Y+7)
+sliderTrack.BackgroundColor3=Color3.fromRGB(35,35,54); sliderTrack.BorderSizePixel=0
+corner(sliderTrack,2); mkStroke(sliderTrack,Color3.fromRGB(50,50,72),1)
+
+local sliderFill=Instance.new("Frame",sliderTrack)
+sliderFill.Size=UDim2.new(0,0,1,0); sliderFill.BackgroundColor3=Color3.fromRGB(100,80,220)
+sliderFill.BorderSizePixel=0; corner(sliderFill,2)
+
+local sliderThumb=Instance.new("TextButton",panel)
+sliderThumb.Size=UDim2.new(0,14,0,14); sliderThumb.BackgroundColor3=Color3.fromRGB(200,190,255)
+sliderThumb.Text=""; sliderThumb.AutoButtonColor=false; sliderThumb.ZIndex=6
+corner(sliderThumb,7); mkStroke(sliderThumb,Color3.fromRGB(100,80,220),1.5)
+
+local sliderHit=Instance.new("TextButton",panel)
+sliderHit.Size=UDim2.new(1,-24,0,SLIDER_H); sliderHit.Position=UDim2.new(0,12,0,SLIDER_Y)
+sliderHit.BackgroundTransparency=1; sliderHit.Text=""; sliderHit.AutoButtonColor=false; sliderHit.ZIndex=5
+
+local sliderDragging=false
+local TRACK_W=PW-24
+
+local function setSliderValue(v)
+    v=math.clamp(math.round(v),SLIDER_MIN,SLIDER_MAX)
+    tpDistance=v; distValLbl.Text=tostring(v).." st"
+    local pct=(v-SLIDER_MIN)/(SLIDER_MAX-SLIDER_MIN)
+    sliderFill.Size=UDim2.new(pct,0,1,0)
+    sliderThumb.Position=UDim2.new(0,12+pct*TRACK_W-7,0,SLIDER_Y+2)
+end
+setSliderValue(tpDistance)
+
+sliderHit.MouseButton1Down:Connect(function() sliderDragging=true end)
+sliderHit.MouseButton1Up:Connect(function() sliderDragging=false end)
+UIS.InputChanged:Connect(function(input)
+    if sliderDragging and input.UserInputType==Enum.UserInputType.MouseMovement then
+        local rel=(input.Position.X-sliderTrack.AbsolutePosition.X)/sliderTrack.AbsoluteSize.X
+        setSliderValue(SLIDER_MIN+rel*(SLIDER_MAX-SLIDER_MIN))
+    end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 then sliderDragging=false end
+end)
+
+-- ══ TP BUTTON ══════════════════════════════════════════════════════════════
+local TP_BTN_Y=SLIDER_Y+SLIDER_H+10
+
+local tpBtn=Instance.new("TextButton",panel)
+tpBtn.Size=UDim2.new(1,-24,0,38); tpBtn.Position=UDim2.new(0,12,0,TP_BTN_Y)
+tpBtn.BackgroundColor3=Color3.fromRGB(32,32,48); tpBtn.Text="▶  Start Teleport"
+tpBtn.TextColor3=Color3.fromRGB(120,118,160); tpBtn.Font=Enum.Font.GothamBold
+tpBtn.TextSize=13; tpBtn.AutoButtonColor=false; corner(tpBtn,9)
+local tpBtnStroke=mkStroke(tpBtn,Color3.fromRGB(50,50,72),1.5)
+tpBtn.MouseEnter:Connect(function() if not tpLoopActive then tw(tpBtn,{BackgroundColor3=Color3.fromRGB(42,42,62)}) end end)
+tpBtn.MouseLeave:Connect(function() if not tpLoopActive then tw(tpBtn,{BackgroundColor3=Color3.fromRGB(32,32,48)}) end end)
+
+-- ══ CLONE TOGGLE ═══════════════════════════════════════════════════════════
+local CLONE_Y=TP_BTN_Y+38+8
+
+local cloneRow=Instance.new("Frame",panel)
+cloneRow.Size=UDim2.new(1,-24,0,28); cloneRow.Position=UDim2.new(0,12,0,CLONE_Y)
+cloneRow.BackgroundColor3=Color3.fromRGB(12,22,18); cloneRow.BorderSizePixel=0
+corner(cloneRow,8); mkStroke(cloneRow,Color3.fromRGB(30,72,50),1)
+
+local cloneIcon=Instance.new("TextLabel",cloneRow)
+cloneIcon.Size=UDim2.new(0,22,1,0); cloneIcon.Position=UDim2.new(0,8,0,0)
+cloneIcon.BackgroundTransparency=1; cloneIcon.Text="👤"; cloneIcon.TextSize=12; cloneIcon.Font=Enum.Font.Gotham
+
+local cloneLbl=Instance.new("TextLabel",cloneRow)
+cloneLbl.Size=UDim2.new(1,-72,1,0); cloneLbl.Position=UDim2.new(0,30,0,0)
+cloneLbl.BackgroundTransparency=1; cloneLbl.Text="Clone Mode  (one-shot TP)"
+cloneLbl.TextColor3=Color3.fromRGB(80,160,110); cloneLbl.Font=Enum.Font.GothamMedium
+cloneLbl.TextSize=11; cloneLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local cloneToggle=Instance.new("TextButton",cloneRow)
+cloneToggle.Size=UDim2.new(0,36,0,18); cloneToggle.Position=UDim2.new(1,-44,0.5,-9)
+cloneToggle.BackgroundColor3=Color3.fromRGB(22,36,28); cloneToggle.Text=""
+cloneToggle.AutoButtonColor=false; cloneToggle.ZIndex=4; corner(cloneToggle,9)
+local cloneToggleStroke=mkStroke(cloneToggle,Color3.fromRGB(35,80,52),1.2)
+local cloneThumb=Instance.new("Frame",cloneToggle)
+cloneThumb.Size=UDim2.new(0,12,0,12); cloneThumb.Position=UDim2.new(0,3,0.5,-6)
+cloneThumb.BackgroundColor3=Color3.fromRGB(55,110,75); cloneThumb.BorderSizePixel=0; cloneThumb.ZIndex=5; corner(cloneThumb,6)
+
+local cloneBadge=Instance.new("TextLabel",tpBtn)
+cloneBadge.Size=UDim2.new(0,54,0,16); cloneBadge.Position=UDim2.new(1,-58,0.5,-8)
+cloneBadge.BackgroundColor3=Color3.fromRGB(20,80,45); cloneBadge.Text="CLONE"
+cloneBadge.TextColor3=Color3.fromRGB(80,220,130); cloneBadge.Font=Enum.Font.GothamBold
+cloneBadge.TextSize=9; cloneBadge.ZIndex=7; cloneBadge.Visible=false
+corner(cloneBadge,4); mkStroke(cloneBadge,Color3.fromRGB(40,140,70),1)
+
+local function setCloneMode(on)
+    cloneMode=on
+    if on then
+        tw(cloneToggle,{BackgroundColor3=Color3.fromRGB(16,50,30)})
+        tw(cloneThumb,{Position=UDim2.new(0,21,0.5,-6),BackgroundColor3=Color3.fromRGB(80,230,130)})
+        cloneToggleStroke.Color=Color3.fromRGB(50,180,90)
+        cloneLbl.TextColor3=Color3.fromRGB(80,230,130)
+        cloneBadge.Visible=true
+        if tpLoopActive then
+            tpLoopActive=false
+            if tpLoopConn then tpLoopConn:Disconnect(); tpLoopConn=nil end
+            tpBtn.Text="▶  Summon Clone"; tpBtn.TextColor3=Color3.fromRGB(80,220,130)
+            tw(tpBtn,{BackgroundColor3=Color3.fromRGB(14,40,24)}); tpBtnStroke.Color=Color3.fromRGB(40,130,65)
+        else
+            tpBtn.Text="▶  Summon Clone"; tpBtn.TextColor3=Color3.fromRGB(80,220,130)
+            tw(tpBtn,{BackgroundColor3=Color3.fromRGB(14,40,24)}); tpBtnStroke.Color=Color3.fromRGB(40,130,65)
+        end
+    else
+        tw(cloneToggle,{BackgroundColor3=Color3.fromRGB(22,36,28)})
+        tw(cloneThumb,{Position=UDim2.new(0,3,0.5,-6),BackgroundColor3=Color3.fromRGB(55,110,75)})
+        cloneToggleStroke.Color=Color3.fromRGB(35,80,52)
+        cloneLbl.TextColor3=Color3.fromRGB(80,160,110)
+        cloneBadge.Visible=false
+        tpBtn.Text="▶  Start Teleport"; tpBtn.TextColor3=Color3.fromRGB(120,118,160)
+        tw(tpBtn,{BackgroundColor3=Color3.fromRGB(32,32,48)}); tpBtnStroke.Color=Color3.fromRGB(50,50,72)
+    end
+end
+
+cloneToggle.MouseButton1Click:Connect(function() setCloneMode(not cloneMode) end)
+cloneRow.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 then setCloneMode(not cloneMode) end
+end)
+
+-- ══ NO-TP TOGGLE ═══════════════════════════════════════════════════════════
+local NOTP_Y=CLONE_Y+28+4
+
+local noTpRow=Instance.new("Frame",panel)
+noTpRow.Size=UDim2.new(1,-24,0,28); noTpRow.Position=UDim2.new(0,12,0,NOTP_Y)
+noTpRow.BackgroundColor3=Color3.fromRGB(18,18,28); noTpRow.BorderSizePixel=0
+corner(noTpRow,8); mkStroke(noTpRow,Color3.fromRGB(44,44,64),1)
+
+local noTpIcon=Instance.new("TextLabel",noTpRow)
+noTpIcon.Size=UDim2.new(0,22,1,0); noTpIcon.Position=UDim2.new(0,8,0,0)
+noTpIcon.BackgroundTransparency=1; noTpIcon.Text="🚫"; noTpIcon.TextSize=12; noTpIcon.Font=Enum.Font.Gotham
+
+local noTpLbl=Instance.new("TextLabel",noTpRow)
+noTpLbl.Size=UDim2.new(1,-72,1,0); noTpLbl.Position=UDim2.new(0,30,0,0)
+noTpLbl.BackgroundTransparency=1; noTpLbl.Text="Spectate Mode  (no teleport)"
+noTpLbl.TextColor3=Color3.fromRGB(120,118,155); noTpLbl.Font=Enum.Font.GothamMedium
+noTpLbl.TextSize=11; noTpLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local noTpToggle=Instance.new("TextButton",noTpRow)
+noTpToggle.Size=UDim2.new(0,36,0,18); noTpToggle.Position=UDim2.new(1,-44,0.5,-9)
+noTpToggle.BackgroundColor3=Color3.fromRGB(35,35,52); noTpToggle.Text=""
+noTpToggle.AutoButtonColor=false; noTpToggle.ZIndex=4; corner(noTpToggle,9)
+local noTpToggleStroke=mkStroke(noTpToggle,Color3.fromRGB(55,55,80),1.2)
+local noTpThumb=Instance.new("Frame",noTpToggle)
+noTpThumb.Size=UDim2.new(0,12,0,12); noTpThumb.Position=UDim2.new(0,3,0.5,-6)
+noTpThumb.BackgroundColor3=Color3.fromRGB(80,78,110); noTpThumb.BorderSizePixel=0; noTpThumb.ZIndex=5; corner(noTpThumb,6)
+
+local function setNoTpMode(on)
+    noTpMode=on
+    if on then
+        tw(noTpToggle,{BackgroundColor3=Color3.fromRGB(38,22,72)})
+        tw(noTpThumb,{Position=UDim2.new(0,21,0.5,-6),BackgroundColor3=Color3.fromRGB(160,140,255)})
+        noTpToggleStroke.Color=Color3.fromRGB(100,80,200); noTpLbl.TextColor3=Color3.fromRGB(180,165,255)
+        if tpLoopActive then
+            tpLoopActive=false
+            if tpLoopConn then tpLoopConn:Disconnect(); tpLoopConn=nil end
+            if cloneMode then
+                tpBtn.Text="▶  Summon Clone"; tpBtn.TextColor3=Color3.fromRGB(80,220,130)
+                tw(tpBtn,{BackgroundColor3=Color3.fromRGB(14,40,24)}); tpBtnStroke.Color=Color3.fromRGB(40,130,65)
+            else
+                tpBtn.Text="▶  Start Teleport"; tpBtn.TextColor3=Color3.fromRGB(120,118,160)
+                tw(tpBtn,{BackgroundColor3=Color3.fromRGB(32,32,48)}); tpBtnStroke.Color=Color3.fromRGB(50,50,72)
+            end
+        end
+    else
+        tw(noTpToggle,{BackgroundColor3=Color3.fromRGB(35,35,52)})
+        tw(noTpThumb,{Position=UDim2.new(0,3,0.5,-6),BackgroundColor3=Color3.fromRGB(80,78,110)})
+        noTpToggleStroke.Color=Color3.fromRGB(55,55,80); noTpLbl.TextColor3=Color3.fromRGB(120,118,155)
+    end
+end
+
+noTpToggle.MouseButton1Click:Connect(function() setNoTpMode(not noTpMode) end)
+noTpRow.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 then setNoTpMode(not noTpMode) end
+end)
+
+-- ══ SLAP SECTION ═══════════════════════════════════════════════════════════
+local SLAP_DIV_Y=NOTP_Y+28+8
+local slapDiv=Instance.new("Frame",panel)
+slapDiv.Size=UDim2.new(1,-24,0,1); slapDiv.Position=UDim2.new(0,12,0,SLAP_DIV_Y)
+slapDiv.BackgroundColor3=Color3.fromRGB(60,35,35); slapDiv.BorderSizePixel=0
+
+local SLAP_SEC_Y=SLAP_DIV_Y+8
+local slapSecLbl=secLbl("⚡ SLAP",SLAP_SEC_Y); slapSecLbl.TextColor3=Color3.fromRGB(200,80,60)
+
+local SLAP_STRENGTH_Y=SLAP_SEC_Y+16
+
+local function parseAxisValue(text)
+    if not text or text=="" then return nil end
+    local t=text:lower():match("^%s*(.-)%s*$")
+    if t=="inf" or t=="infinity" or t=="math.huge" then return math.huge end
+    if t=="-inf" or t=="-infinity" or t=="-math.huge" then return -math.huge end
+    return tonumber(t)
+end
+
+local function makeAxisBox(axisName,defaultVal,color,xOffset,yOffset)
+    local lbl=Instance.new("TextLabel",panel)
+    lbl.Size=UDim2.new(0,16,0,26); lbl.Position=UDim2.new(0,xOffset,0,yOffset)
+    lbl.BackgroundTransparency=1; lbl.Text=axisName; lbl.TextColor3=color
+    lbl.Font=Enum.Font.GothamBold; lbl.TextSize=12; lbl.TextXAlignment=Enum.TextXAlignment.Center
+    local box=Instance.new("TextBox",panel)
+    box.Size=UDim2.new(0,72,0,26); box.Position=UDim2.new(0,xOffset+18,0,yOffset)
+    box.BackgroundColor3=Color3.fromRGB(28,14,14); box.Text=tostring(defaultVal)
+    box.PlaceholderText="0 / inf"; box.PlaceholderColor3=Color3.fromRGB(90,60,60)
+    box.TextColor3=color; box.Font=Enum.Font.GothamBold; box.TextSize=13
+    box.TextXAlignment=Enum.TextXAlignment.Center; box.ClearTextOnFocus=false; box.BorderSizePixel=0
+    corner(box,6); mkStroke(box,Color3.fromRGB(100,40,40),1.2)
+    return lbl,box
+end
+
+local AX,AY2,AZ=12,12+90+6,12+90+6+90+6
+local slapXLbl,slapXBox=makeAxisBox("X",slapX,Color3.fromRGB(255,100,100),AX,SLAP_STRENGTH_Y)
+local slapYLbl,slapYBox=makeAxisBox("Y",slapY,Color3.fromRGB(100,220,100),AY2,SLAP_STRENGTH_Y)
+local slapZLbl,slapZBox=makeAxisBox("Z",slapZ,Color3.fromRGB(100,160,255),AZ,SLAP_STRENGTH_Y)
+
+slapXBox:GetPropertyChangedSignal("Text"):Connect(function() local v=parseAxisValue(slapXBox.Text); if v then slapX=v end end)
+slapYBox:GetPropertyChangedSignal("Text"):Connect(function() local v=parseAxisValue(slapYBox.Text); if v then slapY=v end end)
+slapZBox:GetPropertyChangedSignal("Text"):Connect(function() local v=parseAxisValue(slapZBox.Text); if v then slapZ=v end end)
+
+local SLAP_DELAY_Y=SLAP_STRENGTH_Y+32
+local slapDelayLbl=Instance.new("TextLabel",panel)
+slapDelayLbl.Size=UDim2.new(0,90,0,26); slapDelayLbl.Position=UDim2.new(0,12,0,SLAP_DELAY_Y)
+slapDelayLbl.BackgroundTransparency=1; slapDelayLbl.Text="⏱ Delay (s):"
+slapDelayLbl.TextColor3=Color3.fromRGB(140,140,180); slapDelayLbl.Font=Enum.Font.GothamMedium
+slapDelayLbl.TextSize=12; slapDelayLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local slapDelayBox=Instance.new("TextBox",panel)
+slapDelayBox.Size=UDim2.new(1,-110,0,26); slapDelayBox.Position=UDim2.new(0,106,0,SLAP_DELAY_Y)
+slapDelayBox.BackgroundColor3=Color3.fromRGB(14,14,28); slapDelayBox.Text="0.5"
+slapDelayBox.PlaceholderText="seconds"; slapDelayBox.PlaceholderColor3=Color3.fromRGB(60,60,90)
+slapDelayBox.TextColor3=Color3.fromRGB(160,155,255); slapDelayBox.Font=Enum.Font.GothamBold
+slapDelayBox.TextSize=13; slapDelayBox.TextXAlignment=Enum.TextXAlignment.Center
+slapDelayBox.ClearTextOnFocus=false; slapDelayBox.BorderSizePixel=0
+corner(slapDelayBox,6); mkStroke(slapDelayBox,Color3.fromRGB(60,55,120),1.2)
+slapDelayBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local v=tonumber(slapDelayBox.Text); if v then autoSlapDelay=math.clamp(v,0.05,60) end
+end)
+
+local SLAP_BTN_Y=SLAP_DELAY_Y+32
+
+local slapBtn=Instance.new("TextButton",panel)
+slapBtn.Size=UDim2.new(0,158,0,34); slapBtn.Position=UDim2.new(0,12,0,SLAP_BTN_Y)
+slapBtn.BackgroundColor3=Color3.fromRGB(44,14,10); slapBtn.Text="👋  Slap"
+slapBtn.TextColor3=Color3.fromRGB(255,130,100); slapBtn.Font=Enum.Font.GothamBold
+slapBtn.TextSize=13; slapBtn.AutoButtonColor=false; corner(slapBtn,8)
+local slapBtnStroke=mkStroke(slapBtn,Color3.fromRGB(160,50,30),1.5)
+slapBtn.MouseEnter:Connect(function() tw(slapBtn,{BackgroundColor3=Color3.fromRGB(66,20,14)}) end)
+slapBtn.MouseLeave:Connect(function() if not autoSlapActive then tw(slapBtn,{BackgroundColor3=Color3.fromRGB(44,14,10)}) end end)
+
+local autoSlapBtn=Instance.new("TextButton",panel)
+autoSlapBtn.Size=UDim2.new(0,112,0,34); autoSlapBtn.Position=UDim2.new(0,176,0,SLAP_BTN_Y)
+autoSlapBtn.BackgroundColor3=Color3.fromRGB(30,20,14); autoSlapBtn.Text="🔁 AUTO SLAP"
+autoSlapBtn.TextColor3=Color3.fromRGB(180,120,80); autoSlapBtn.Font=Enum.Font.GothamBold
+autoSlapBtn.TextSize=11; autoSlapBtn.AutoButtonColor=false; corner(autoSlapBtn,8)
+local autoSlapStroke=mkStroke(autoSlapBtn,Color3.fromRGB(100,60,30),1.5)
+autoSlapBtn.MouseEnter:Connect(function() if not autoSlapActive then tw(autoSlapBtn,{BackgroundColor3=Color3.fromRGB(46,30,20)}) end end)
+autoSlapBtn.MouseLeave:Connect(function() if not autoSlapActive then tw(autoSlapBtn,{BackgroundColor3=Color3.fromRGB(30,20,14)}) end end)
+
+-- ══ SLAM SECTION ═══════════════════════════════════════════════════════════
+local SLAM_DIV_Y = SLAP_BTN_Y + 34 + 8
+
+local slamDivider = Instance.new("Frame", panel)
+slamDivider.Size = UDim2.new(1,-24,0,1)
+slamDivider.Position = UDim2.new(0,12,0,SLAM_DIV_Y)
+slamDivider.BackgroundColor3 = Color3.fromRGB(30,55,80)
+slamDivider.BorderSizePixel = 0
+
+local SLAM_SEC_Y = SLAM_DIV_Y + 8
+
+local slamSecLbl = Instance.new("TextLabel", panel)
+slamSecLbl.Size = UDim2.new(1,-24,0,14)
+slamSecLbl.Position = UDim2.new(0,12,0,SLAM_SEC_Y)
+slamSecLbl.BackgroundTransparency = 1
+slamSecLbl.Text = "💥 SLAM  —  auto left-click on alive targets"
+slamSecLbl.TextColor3 = Color3.fromRGB(60,140,210)
+slamSecLbl.Font = Enum.Font.GothamBold
+slamSecLbl.TextSize = 10
+slamSecLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local SLAM_BTN_Y = SLAM_SEC_Y + 18
+
+local slamBtn = Instance.new("TextButton", panel)
+slamBtn.Size       = UDim2.new(1,-24,0,40)
+slamBtn.Position   = UDim2.new(0,12,0,SLAM_BTN_Y)
+slamBtn.BackgroundColor3 = Color3.fromRGB(14,28,42)
+slamBtn.Text       = "⚡  SLAM  [ OFF ]"
+slamBtn.TextColor3 = Color3.fromRGB(70,130,190)
+slamBtn.Font       = Enum.Font.GothamBold
+slamBtn.TextSize   = 14
+slamBtn.AutoButtonColor = false
+corner(slamBtn, 10)
+local slamBtnStroke = mkStroke(slamBtn, Color3.fromRGB(30,80,130), 1.8)
+
+local slamDot = Instance.new("Frame", slamBtn)
+slamDot.Size     = UDim2.new(0,8,0,8)
+slamDot.Position = UDim2.new(0,10,0.5,-4)
+slamDot.BackgroundColor3 = Color3.fromRGB(50,80,110)
+slamDot.BorderSizePixel  = 0
+corner(slamDot, 4)
+
+slamBtn.MouseEnter:Connect(function()
+    if not slamActive then tw(slamBtn,{BackgroundColor3=Color3.fromRGB(20,40,60)}) end
+end)
+slamBtn.MouseLeave:Connect(function()
+    if not slamActive then tw(slamBtn,{BackgroundColor3=Color3.fromRGB(14,28,42)}) end
+end)
+
+-- ══ SLAM LOGIC ═════════════════════════════════════════════════════════════
+local function isPlayerAlive(plr)
+    local char = plr.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    return hum.Health > 0 and hum:GetState() ~= Enum.HumanoidStateType.Dead
+end
+
+local function doSlamClick()
+    local character = LocalPlayer.Character
+    if not character then return end
+    local tool = character:FindFirstChildOfClass("Tool")
+    if tool then
+        pcall(function() tool:Activate() end)
+    end
+end
+
+local function stopSlam()
+    slamActive = false
+    if slamConn then slamConn:Disconnect(); slamConn = nil end
+    table.clear(slamWasAlive)
+    slamBtn.Text = "⚡  SLAM  [ OFF ]"
+    slamBtn.TextColor3 = Color3.fromRGB(70,130,190)
+    tw(slamBtn, {BackgroundColor3 = Color3.fromRGB(14,28,42)})
+    slamBtnStroke.Color = Color3.fromRGB(30,80,130)
+    tw(slamDot, {BackgroundColor3 = Color3.fromRGB(50,80,110)})
+end
+
+local function startSlam()
+    if slamActive then return end
+    slamActive = true
+    table.clear(slamWasAlive)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            slamWasAlive[plr] = isPlayerAlive(plr)
+        end
+    end
+    slamBtn.Text = "⚡  SLAM  [ ON ]"
+    slamBtn.TextColor3 = Color3.fromRGB(255,255,100)
+    tw(slamBtn, {BackgroundColor3 = Color3.fromRGB(40,35,10)})
+    slamBtnStroke.Color = Color3.fromRGB(200,180,30)
+    tw(slamDot, {BackgroundColor3 = Color3.fromRGB(255,230,40)})
+    slamConn = RunService.Heartbeat:Connect(function()
+        if not slamActive then return end
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr == LocalPlayer then continue end
+            local state = playerStates[plr]
+            if not (state and state.checked) then
+                slamWasAlive[plr] = nil
+                continue
+            end
+            local nowAlive = isPlayerAlive(plr)
+            local wasAlive = slamWasAlive[plr]
+            if wasAlive == nil then
+                slamWasAlive[plr] = nowAlive
+            elseif nowAlive and not wasAlive then
+                slamWasAlive[plr] = true
+                doSlamClick()
+            elseif nowAlive and wasAlive then
+                doSlamClick()
+            else
+                slamWasAlive[plr] = false
+            end
+        end
+    end)
+end
+
+slamBtn.MouseButton1Click:Connect(function()
+    if slamActive then stopSlam() else startSlam() end
+end)
+
+-- ══ KL SECTION ═════════════════════════════════════════════════════════════
+local KL_DIV_Y = SLAM_BTN_Y + 40 + 8
+
+local klDivider = Instance.new("Frame", panel)
+klDivider.Size = UDim2.new(1,-24,0,1)
+klDivider.Position = UDim2.new(0,12,0,KL_DIV_Y)
+klDivider.BackgroundColor3 = Color3.fromRGB(80,30,80)
+klDivider.BorderSizePixel = 0
+
+local KL_SEC_Y = KL_DIV_Y + 8
+
+local klSecLbl = Instance.new("TextLabel", panel)
+klSecLbl.Size = UDim2.new(1,-24,0,14)
+klSecLbl.Position = UDim2.new(0,12,0,KL_SEC_Y)
+klSecLbl.BackgroundTransparency = 1
+klSecLbl.Text = "🎯 KL  —  auto-use held tool on alive checked players"
+klSecLbl.TextColor3 = Color3.fromRGB(180,80,220)
+klSecLbl.Font = Enum.Font.GothamBold
+klSecLbl.TextSize = 10
+klSecLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local KL_PILL_Y = KL_SEC_Y + 17
+local klToolPill = Instance.new("Frame", panel)
+klToolPill.Size = UDim2.new(1,-24,0,22)
+klToolPill.Position = UDim2.new(0,12,0,KL_PILL_Y)
+klToolPill.BackgroundColor3 = Color3.fromRGB(18,12,24)
+klToolPill.BorderSizePixel = 0
+corner(klToolPill, 7)
+mkStroke(klToolPill, Color3.fromRGB(60,30,80), 1)
+
+local klToolIcon = Instance.new("TextLabel", klToolPill)
+klToolIcon.Size = UDim2.new(0,22,1,0); klToolIcon.Position = UDim2.new(0,6,0,0)
+klToolIcon.BackgroundTransparency = 1; klToolIcon.Text = "🔧"
+klToolIcon.TextSize = 11; klToolIcon.Font = Enum.Font.Gotham
+
+local klToolNameLbl = Instance.new("TextLabel", klToolPill)
+klToolNameLbl.Size = UDim2.new(1,-28,1,0); klToolNameLbl.Position = UDim2.new(0,26,0,0)
+klToolNameLbl.BackgroundTransparency = 1; klToolNameLbl.Text = "No tool equipped"
+klToolNameLbl.TextColor3 = Color3.fromRGB(100,70,130); klToolNameLbl.Font = Enum.Font.GothamMedium
+klToolNameLbl.TextSize = 11; klToolNameLbl.TextXAlignment = Enum.TextXAlignment.Left
+klToolNameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+local KL_BTN_Y = KL_PILL_Y + 22 + 6
+
+local klBtn = Instance.new("TextButton", panel)
+klBtn.Size = UDim2.new(1,-24,0,40)
+klBtn.Position = UDim2.new(0,12,0,KL_BTN_Y)
+klBtn.BackgroundColor3 = Color3.fromRGB(22,12,28)
+klBtn.Text = "🎯  KL  [ OFF ]"
+klBtn.TextColor3 = Color3.fromRGB(160,80,200)
+klBtn.Font = Enum.Font.GothamBold
+klBtn.TextSize = 14
+klBtn.AutoButtonColor = false
+corner(klBtn, 10)
+local klBtnStroke = mkStroke(klBtn, Color3.fromRGB(80,30,110), 1.8)
+
+local klDot = Instance.new("Frame", klBtn)
+klDot.Size = UDim2.new(0,8,0,8); klDot.Position = UDim2.new(0,10,0.5,-4)
+klDot.BackgroundColor3 = Color3.fromRGB(80,40,100); klDot.BorderSizePixel = 0
+corner(klDot, 4)
+
+klBtn.MouseEnter:Connect(function()
+    if not klActive then tw(klBtn,{BackgroundColor3=Color3.fromRGB(34,18,44)}) end
+end)
+klBtn.MouseLeave:Connect(function()
+    if not klActive then tw(klBtn,{BackgroundColor3=Color3.fromRGB(22,12,28)}) end
+end)
+
+-- ── KL LOGIC ───────────────────────────────────────────────────────────────
+
+local function getEquippedTool()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Tool")
+end
+
+--[[
+    doKLUse: dispatches the correct attack for each known tool by name.
+    Each tool uses a different remote name and argument format discovered
+    by inspecting the tool's descendant tree.
+
+    Known tools and their mechanisms:
+      SlapHand      — RemoteEvent "Event"      :FireServer("slash", tgtChar, Vector3)
+      FireSlap      — RemoteEvent "Event"      :FireServer("slash", tgtChar, Vector3)
+      GoldenSlap    — RemoteEvent "Event"      :FireServer("slash", tgtChar, Vector3)
+      GodSlap       — RemoteEvent "Event"      :FireServer("slash", tgtChar, Vector3)
+      FreezeGun     — RemoteEvent "FireEvent"  :FireServer(tgtChar)
+      BodySwap      — RemoteEvent "SwapWith"   :FireServer(tgtChar)
+      GoldCarpet    — RemoteFunction "ServerControl" (unknown args; best-effort)
+      BanHammer     — NO remote; touch-based. We move the Handle onto the target.
+      Everything else — generic fallback: try RemoteEvent/RemoteFunction with common arg patterns
+]]
+local function doKLUse(plr)
+    local tool = getEquippedTool()
+    if not tool then return end
+    local tgtChar = plr.Character
+    if not tgtChar then return end
+    local tgtHRP = tgtChar:FindFirstChild("HumanoidRootPart")
+    local tgtPos  = tgtHRP and tgtHRP.Position or Vector3.zero
+    local name = tool.Name
+
+    -- ── Slap-family tools (SlapHand, FireSlap, GoldenSlap, GodSlap)
+    -- All share the same remote name "Event" and the same FireServer signature.
+    if name == "SlapHand" or name == "FireSlap" or name == "GoldenSlap" or name == "GodSlap" then
+        local remote = tool:FindFirstChild("Event")
+        if remote and remote:IsA("RemoteEvent") then
+            pcall(function() remote:FireServer("slash", tgtChar, Vector3.new(0, 80, 0)) end)
+        end
+
+    -- ── FreezeGun — RemoteEvent "FireEvent", just pass the target character
+    elseif name == "FreezeGun" then
+        local remote = tool:FindFirstChild("FireEvent")
+        if remote and remote:IsA("RemoteEvent") then
+            pcall(function() remote:FireServer(tgtChar) end)
+        end
+
+    -- ── BodySwap — RemoteEvent "SwapWith", pass the target character
+    elseif name == "BodySwap" then
+        local remote = tool:FindFirstChild("SwapWith")
+        if remote and remote:IsA("RemoteEvent") then
+            pcall(function() remote:FireServer(tgtChar) end)
+        end
+
+    -- ── GoldCarpet — RemoteFunction "ServerControl"
+    -- Exact args unknown; try the target character and player object
+    elseif name == "GoldCarpet" then
+        local rf = tool:FindFirstChild("ServerControl")
+        if rf and rf:IsA("RemoteFunction") then
+            pcall(function() rf:InvokeServer(tgtChar) end)
+            pcall(function() rf:InvokeServer(plr) end)
+        end
+
+    elseif name == "BanHammer" then
+        -- Drop the tool into workspace so the local character doesn't move with it.
+        -- Only the Handle gets repositioned; other players never see a teleport.
+        tool.Parent = workspace
+        local handle = tool:FindFirstChild("Handle")
+        if handle and tgtHRP then
+            pcall(function()
+                handle.CFrame = tgtHRP.CFrame
+                handle.AssemblyLinearVelocity = Vector3.zero
+                handle.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+        -- Re-parent back to backpack so KL can reuse it next frame
+        task.delay(0.08, function()
+            if tool and tool.Parent ~= nil then
+                tool.Parent = LocalPlayer.Backpack
+            end
+        end)
+
+    -- ── Generic fallback for any other tool not listed above.
+    -- Tries the most common RemoteEvent/RemoteFunction argument patterns.
+    else
+        for _, child in ipairs(tool:GetDescendants()) do
+            if child:IsA("RemoteEvent") then
+                pcall(function() child:FireServer(tgtChar) end)
+                pcall(function() child:FireServer("slash", tgtChar, Vector3.new(0, 80, 0)) end)
+                pcall(function() child:FireServer(tgtHRP, tgtPos) end)
+                pcall(function() child:FireServer(tgtChar, tgtPos) end)
+                pcall(function() child:FireServer(plr) end)
+            elseif child:IsA("RemoteFunction") then
+                pcall(function() child:InvokeServer(tgtChar) end)
+                pcall(function() child:InvokeServer(plr) end)
+            end
+        end
+        pcall(function() tool:Activate() end)
+    end
+end
+
+local function stopKL()
+    klActive = false
+    if klConn then klConn:Disconnect(); klConn = nil end
+    table.clear(klWasAlive)
+    klBtn.Text = "🎯  KL  [ OFF ]"
+    klBtn.TextColor3 = Color3.fromRGB(160,80,200)
+    tw(klBtn, {BackgroundColor3 = Color3.fromRGB(22,12,28)})
+    klBtnStroke.Color = Color3.fromRGB(80,30,110)
+    tw(klDot, {BackgroundColor3 = Color3.fromRGB(80,40,100)})
+end
+
+local function startKL()
+    if klActive then return end
+    if getEquippedTool() == nil then
+        -- Flash pill red to hint: no tool equipped
+        tw(klToolPill, {BackgroundColor3 = Color3.fromRGB(60,14,14)})
+        task.delay(0.4, function() tw(klToolPill, {BackgroundColor3 = Color3.fromRGB(18,12,24)}) end)
+        return
+    end
+    klActive = true
+    table.clear(klWasAlive)
+
+    -- Seed initial alive states so we don't fire on first frame
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            klWasAlive[plr] = isPlayerAlive(plr)
+        end
+    end
+
+    klBtn.Text = "🎯  KL  [ ON ]"
+    klBtn.TextColor3 = Color3.fromRGB(255,180,255)
+    tw(klBtn, {BackgroundColor3 = Color3.fromRGB(50,12,60)})
+    klBtnStroke.Color = Color3.fromRGB(200,60,240)
+    tw(klDot, {BackgroundColor3 = Color3.fromRGB(240,100,255)})
+
+    klConn = RunService.Heartbeat:Connect(function()
+        if not klActive then return end
+
+        -- Keep tool-name pill updated every frame
+        local heldTool = getEquippedTool()
+        if heldTool then
+            klToolNameLbl.Text = heldTool.Name
+            klToolNameLbl.TextColor3 = Color3.fromRGB(210,160,255)
+            klToolIcon.Text = "⚔️"
+        else
+            klToolNameLbl.Text = "No tool equipped"
+            klToolNameLbl.TextColor3 = Color3.fromRGB(100,70,130)
+            klToolIcon.Text = "🔧"
+        end
+
+        -- Pause firing if tool was unequipped, but stay ON so it resumes when re-equipped
+        if not heldTool then return end
+
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr == LocalPlayer then continue end
+
+            local state = playerStates[plr]
+            if not (state and state.checked) then
+                klWasAlive[plr] = nil   -- reset seed; will re-seed when checked again
+                continue
+            end
+
+            local nowAlive = isPlayerAlive(plr)
+            local wasAlive = klWasAlive[plr]
+
+            if wasAlive == nil then
+                -- Freshly checked: seed without firing
+                klWasAlive[plr] = nowAlive
+            elseif nowAlive and not wasAlive then
+                -- Just respawned alive → fire immediately
+                klWasAlive[plr] = true
+                doKLUse(plr)
+            elseif nowAlive and wasAlive then
+                -- Continuously alive → fire every frame (maximum pressure)
+                doKLUse(plr)
+            else
+                -- Dead or no character
+                klWasAlive[plr] = false
+            end
+        end
+    end)
+end
+
+klBtn.MouseButton1Click:Connect(function()
+    if klActive then stopKL() else startKL() end
+end)
+
+-- Keep tool-pill name updated even when KL is OFF
+RunService.Heartbeat:Connect(function()
+    if klActive then return end  -- already handled inside the KL loop above
+    local heldTool = getEquippedTool()
+    if heldTool then
+        klToolNameLbl.Text = heldTool.Name
+        klToolNameLbl.TextColor3 = Color3.fromRGB(140,100,180)
+        klToolIcon.Text = "⚔️"
+    else
+        klToolNameLbl.Text = "No tool equipped"
+        klToolNameLbl.TextColor3 = Color3.fromRGB(100,70,130)
+        klToolIcon.Text = "🔧"
+    end
+end)
+
+-- ══ PANEL HEIGHT ════════════════════════════════════════════════════════════
+local PANEL_H = KL_BTN_Y + 40 + 14
+panel.Size = UDim2.new(0, PW, 0, PANEL_H)
+
+-- ══ MINIMIZE ═══════════════════════════════════════════════════════════════
+local minimized=false
+local hideOnMin={
+    scroll,searchFrame,btmDiv,colDiv,
+    tpStatusRow,tpBtn,sliderTrack,sliderHit,sliderThumb,
+    tpSecLbl,sliderSecLbl,distValLbl,
+    colPlayerLbl,colSelLbl,colSpyLbl,selAllBtn,noTpRow,
+    slapDiv,slapSecLbl,
+    slapXLbl,slapXBox,slapYLbl,slapYBox,slapZLbl,slapZBox,
+    slapDelayLbl,slapDelayBox,slapBtn,autoSlapBtn,
+    aimBox,
+    slamDivider, slamSecLbl, slamBtn,
+    cloneRow,
+    klDivider, klSecLbl, klToolPill, klBtn,
+}
+minimizeBtn.MouseButton1Click:Connect(function()
+    minimized=not minimized
+    if minimized then
+        tw(panel,{Size=UDim2.new(0,PW,0,HEADER_H)},0.2)
+        for _,e in ipairs(hideOnMin) do e.Visible=false end; minimizeBtn.Text="□"
+    else
+        tw(panel,{Size=UDim2.new(0,PW,0,PANEL_H)},0.2)
+        for _,e in ipairs(hideOnMin) do e.Visible=true end; minimizeBtn.Text="─"
+    end
+end)
+
+-- ══ SPECTATE ═══════════════════════════════════════════════════════════════
+local function bindCam(char)
+    local hum=char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid",6)
+    if hum then camera.CameraType=Enum.CameraType.Custom; camera.CameraSubject=hum end
+end
+local function stopSpectating()
+    if spectateCharConn then spectateCharConn:Disconnect(); spectateCharConn=nil end
+    spectateTarget=nil; camera.CameraType=Enum.CameraType.Custom
+    local mc=LocalPlayer.Character
+    camera.CameraSubject=mc and mc:FindFirstChildOfClass("Humanoid") or nil
+end
+local function startSpectating(plr)
+    stopSpectating(); spectateTarget=plr
+    if plr.Character then task.spawn(bindCam,plr.Character) end
+    spectateCharConn=plr.CharacterAdded:Connect(function(c)
+        if spectateTarget~=plr then return end; task.spawn(bindCam,c)
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    if not spectateTarget then
+        camera.CameraType=Enum.CameraType.Custom; task.wait()
+        camera.CameraSubject=char:FindFirstChildOfClass("Humanoid")
+    end
+    task.wait(0.1); gui.Parent=LocalPlayer:WaitForChild("PlayerGui")
+end)
+
+-- ══ TELEPORT LOGIC ═════════════════════════════════════════════════════════
+local function getCheckedPlayers()
+    local list={}
+    for plr,state in pairs(playerStates) do
+        if state.checked and plr~=LocalPlayer and Players:FindFirstChild(plr.Name) then
+            table.insert(list,plr)
+        end
+    end
+    return list
+end
+
+local function resolveFirstChecked()
+    for _,name in ipairs(checkOrder) do
+        local plr=Players:FindFirstChild(name)
+        if plr and playerStates[plr] and playerStates[plr].checked then return plr end
+    end
+    return getCheckedPlayers()[1] or nil
+end
+
+local function updateDistPill()
+    local target=firstCheckedPlayer
+    if not target or not Players:FindFirstChild(target.Name)
+       or not(playerStates[target] and playerStates[target].checked) then
+        firstCheckedPlayer=resolveFirstChecked(); target=firstCheckedPlayer
+    end
+    if not target then
+        distNumLbl.Text="— st"; distNumLbl.TextColor3=Color3.fromRGB(110,108,160)
+        mkStroke(distPill,Color3.fromRGB(50,50,80),1.2)
+        aliveStatusLbl.Text="—"; aliveStatusLbl.TextColor3=Color3.fromRGB(110,108,160)
+        aliveDot.BackgroundColor3=Color3.fromRGB(80,80,110)
+        mkStroke(alivePill,Color3.fromRGB(50,50,80),1.2); return
+    end
+    local myChar=LocalPlayer.Character
+    local myHRP=myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local tgtChar=target.Character
+    local tgtHRP=tgtChar and tgtChar:FindFirstChild("HumanoidRootPart")
+    local tgtHum=tgtChar and tgtChar:FindFirstChildOfClass("Humanoid")
+    if not tgtHum or not tgtChar then
+        aliveStatusLbl.Text="..."; aliveStatusLbl.TextColor3=Color3.fromRGB(130,130,160)
+        aliveDot.BackgroundColor3=Color3.fromRGB(90,90,120); mkStroke(alivePill,Color3.fromRGB(55,55,82),1.2)
+    elseif tgtHum.Health<=0 or tgtHum:GetState()==Enum.HumanoidStateType.Dead then
+        aliveStatusLbl.Text="Dead"; aliveStatusLbl.TextColor3=Color3.fromRGB(220,70,60)
+        aliveDot.BackgroundColor3=Color3.fromRGB(200,55,45); mkStroke(alivePill,Color3.fromRGB(140,40,35),1.4)
+        aliveDot.BackgroundTransparency=0
+    else
+        aliveStatusLbl.Text="Alive"; aliveStatusLbl.TextColor3=Color3.fromRGB(75,215,105)
+        mkStroke(alivePill,Color3.fromRGB(38,120,55),1.4)
+        aliveDot.BackgroundColor3=Color3.fromRGB(65,210,95)
+        aliveDot.BackgroundTransparency=_dotVisible and 0 or 0.55
+    end
+    if not myHRP or not tgtHRP then
+        distNumLbl.Text="— st"; distNumLbl.TextColor3=Color3.fromRGB(110,108,160)
+        mkStroke(distPill,Color3.fromRGB(50,50,80),1.2); return
+    end
+    local dist=math.round((myHRP.Position-tgtHRP.Position).Magnitude)
+    distNumLbl.Text=tostring(dist).." st"
+    if dist<=20 then
+        distNumLbl.TextColor3=Color3.fromRGB(80,220,110); mkStroke(distPill,Color3.fromRGB(40,130,60),1.4)
+    elseif dist<=60 then
+        distNumLbl.TextColor3=Color3.fromRGB(230,195,60); mkStroke(distPill,Color3.fromRGB(130,105,30),1.4)
+    else
+        distNumLbl.TextColor3=Color3.fromRGB(230,80,70); mkStroke(distPill,Color3.fromRGB(130,40,35),1.4)
+    end
+end
+
+local function updateTpUI()
+    local targets=getCheckedPlayers(); local count=#targets
+    if count>0 then
+        tpTargetLbl.Text=count==1 and ("Target: "..targets[1].DisplayName) or ("Targets: "..count.." players")
+        tpTargetLbl.TextColor3=Color3.fromRGB(170,165,230)
+    else
+        tpTargetLbl.Text="No player selected"; tpTargetLbl.TextColor3=Color3.fromRGB(90,90,120)
+        distNumLbl.Text="— st"; distNumLbl.TextColor3=Color3.fromRGB(110,108,160)
+        aliveStatusLbl.Text="—"; aliveStatusLbl.TextColor3=Color3.fromRGB(110,108,160)
+        aliveDot.BackgroundColor3=Color3.fromRGB(80,80,110); mkStroke(alivePill,Color3.fromRGB(50,50,80),1.2)
+        if tpLoopActive then
+            tpLoopActive=false
+            if tpLoopConn then tpLoopConn:Disconnect(); tpLoopConn=nil end
+            if cloneMode then
+                tpBtn.Text="▶  Summon Clone"; tpBtn.TextColor3=Color3.fromRGB(80,220,130)
+                tw(tpBtn,{BackgroundColor3=Color3.fromRGB(14,40,24)}); tpBtnStroke.Color=Color3.fromRGB(40,130,65)
+            else
+                tpBtn.Text="▶  Start Teleport"; tpBtn.TextColor3=Color3.fromRGB(120,118,160)
+                tw(tpBtn,{BackgroundColor3=Color3.fromRGB(32,32,48)}); tpBtnStroke.Color=Color3.fromRGB(50,50,72)
+            end
+        end
+    end
+end
+
+local function doTeleportStep()
+    local checked=getCheckedPlayers(); if #checked==0 then return end
+    local myChar=LocalPlayer.Character
+    local myHRP=myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Torso"))
+    if not myHRP then return end
+    local myPos=myHRP.Position; local lookDir=myHRP.CFrame.LookVector
+    local flatLook=Vector3.new(lookDir.X,0,lookDir.Z)
+    if flatLook.Magnitude<0.01 then flatLook=Vector3.new(0,0,-1) end
+    flatLook=flatLook.Unit
+    local basePos=myPos+flatLook*tpDistance
+    local destPos=Vector3.new(basePos.X,myPos.Y,basePos.Z)
+    local lookAt=destPos+flatLook
+    for _,tgt in ipairs(checked) do
+        local tgtChar=tgt.Character
+        local tgtHRP=tgtChar and (tgtChar:FindFirstChild("HumanoidRootPart") or tgtChar:FindFirstChild("Torso"))
+        if not tgtHRP then continue end
+        pcall(function()
+            tgtHRP.CFrame=CFrame.new(destPos,lookAt)
+            tgtHRP.AssemblyLinearVelocity=Vector3.zero
+            tgtHRP.AssemblyAngularVelocity=Vector3.zero
+        end)
+    end
+end
+
+local function stopTpLoop()
+    if not tpLoopActive then return end
+    tpLoopActive=false
+    if tpLoopConn then tpLoopConn:Disconnect(); tpLoopConn=nil end
+    if cloneMode then
+        tpBtn.Text="▶  Summon Clone"; tpBtn.TextColor3=Color3.fromRGB(80,220,130)
+        tw(tpBtn,{BackgroundColor3=Color3.fromRGB(14,40,24)}); tpBtnStroke.Color=Color3.fromRGB(40,130,65)
+    else
+        tpBtn.Text="▶  Start Teleport"; tpBtn.TextColor3=Color3.fromRGB(120,118,160)
+        tw(tpBtn,{BackgroundColor3=Color3.fromRGB(32,32,48)}); tpBtnStroke.Color=Color3.fromRGB(50,50,72)
+    end
+end
+
+local function doCloneSummon()
+    if #getCheckedPlayers()==0 or noTpMode then return end
+    tpBtn.Text="✦  Cloning..."; tpBtn.TextColor3=Color3.fromRGB(180,255,180)
+    tw(tpBtn,{BackgroundColor3=Color3.fromRGB(20,60,35)}); tpBtnStroke.Color=Color3.fromRGB(60,200,100)
+    doTeleportStep()
+    task.delay(0.35, function()
+        if cloneMode then
+            tpBtn.Text="▶  Summon Clone"; tpBtn.TextColor3=Color3.fromRGB(80,220,130)
+            tw(tpBtn,{BackgroundColor3=Color3.fromRGB(14,40,24)}); tpBtnStroke.Color=Color3.fromRGB(40,130,65)
+        end
+    end)
+end
+
+-- ── startTpLoop: does NOT start if KL is active (KL handles its own targeting)
+local function startTpLoop()
+    if tpLoopActive or noTpMode or klActive then return end
+    if cloneMode then doCloneSummon(); return end
+    tpLoopActive=true
+    tpBtn.Text="⏹  Stop Teleport"; tpBtn.TextColor3=Color3.fromRGB(255,100,100)
+    tw(tpBtn,{BackgroundColor3=Color3.fromRGB(50,18,18)}); tpBtnStroke.Color=Color3.fromRGB(100,30,30)
+    local timer=0
+    tpLoopConn=RunService.Heartbeat:Connect(function(dt)
+        if not tpLoopActive then return end
+        timer=timer+dt; if timer<0.05 then return end; timer=0
+        if #getCheckedPlayers()==0 then
+            stopTpLoop(); updateTpUI(); return
+        end
+        doTeleportStep()
+    end)
+end
+
+tpBtn.MouseButton1Click:Connect(function()
+    if #getCheckedPlayers()==0 and not tpLoopActive then return end
+    if cloneMode then
+        if tpLoopActive then stopTpLoop() end
+        doCloneSummon()
+    else
+        if tpLoopActive then stopTpLoop() else startTpLoop() end
+    end
+end)
+
+-- ══ SLAP LOGIC ═════════════════════════════════════════════════════════════
+local function doSlap(plr)
+    local tool=LocalPlayer.Backpack:FindFirstChild("GoldenSlap")
+        or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("GoldenSlap"))
+    if not tool then return end
+    local remote=tool:FindFirstChild("Event"); if not remote then return end
+    local tgtChar=plr.Character; if not tgtChar then return end
+    local vx=parseAxisValue(slapXBox.Text) or slapX
+    local vy=parseAxisValue(slapYBox.Text) or slapY
+    local vz=parseAxisValue(slapZBox.Text) or slapZ
+    pcall(function() remote:FireServer("slash",tgtChar,Vector3.new(vx,vy,vz)) end)
+end
+
+local function slapCheckedPlayers()
+    for _,plr in ipairs(getCheckedPlayers()) do doSlap(plr) end
+end
+
+slapBtn.MouseButton1Click:Connect(function()
+    if #getCheckedPlayers()==0 then return end
+    slapCheckedPlayers()
+    tw(slapBtn,{BackgroundColor3=Color3.fromRGB(180,40,20)})
+    task.delay(0.25,function() tw(slapBtn,{BackgroundColor3=Color3.fromRGB(44,14,10)}) end)
+end)
+
+local function stopAutoSlap()
+    autoSlapActive=false
+    if autoSlapConn then autoSlapConn:Disconnect(); autoSlapConn=nil end
+    autoSlapBtn.Text="🔁 AUTO SLAP"; autoSlapBtn.TextColor3=Color3.fromRGB(180,120,80)
+    tw(autoSlapBtn,{BackgroundColor3=Color3.fromRGB(30,20,14)}); autoSlapStroke.Color=Color3.fromRGB(100,60,30)
+end
+
+local function startAutoSlap()
+    if autoSlapActive or #getCheckedPlayers()==0 then return end
+    autoSlapActive=true
+    autoSlapBtn.Text="⏹ STOP AUTO"; autoSlapBtn.TextColor3=Color3.fromRGB(255,100,60)
+    tw(autoSlapBtn,{BackgroundColor3=Color3.fromRGB(70,20,10)}); autoSlapStroke.Color=Color3.fromRGB(200,60,30)
+    local timer=0
+    autoSlapConn=RunService.Heartbeat:Connect(function(dt)
+        if not autoSlapActive then return end
+        timer=timer+dt; if timer<autoSlapDelay then return end; timer=0
+        local checked=getCheckedPlayers()
+        if #checked==0 then stopAutoSlap(); return end
+        for _,plr in ipairs(checked) do doSlap(plr) end
+    end)
+end
+
+autoSlapBtn.MouseButton1Click:Connect(function()
+    if autoSlapActive then stopAutoSlap() else startAutoSlap() end
+end)
+
+-- ══ PLAYER ROW BUILDER ═════════════════════════════════════════════════════
+local function makeCheckbox(parent,active,colorOn,rightOff,onToggle)
+    local box=Instance.new("TextButton",parent)
+    box.Size=UDim2.new(0,24,0,24); box.Position=UDim2.new(1,rightOff,0.5,-12)
+    box.BackgroundColor3=active and colorOn or Color3.fromRGB(26,26,40)
+    box.Text=active and "✓" or ""; box.TextColor3=Color3.new(1,1,1)
+    box.Font=Enum.Font.GothamBold; box.TextSize=13; box.AutoButtonColor=false; corner(box,6)
+    local s=mkStroke(box,active and colorOn or Color3.fromRGB(50,50,70),1.5)
+    box.MouseButton1Click:Connect(function() onToggle(box,s) end)
+    return box,s
+end
+
+local function refreshPlayerList()
+    for _,c in ipairs(scroll:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    table.clear(playerRows)
+
+    local allPlayers = Players:GetPlayers()
+    countLbl.Text = tostring(#allPlayers).." online"
+
+    for i,plr in ipairs(allPlayers) do
+        if not playerStates[plr] then
+            playerStates[plr]={checked=persistChecked[plr.Name]==true or selectAllActive,spectating=false}
+        end
+        local state=playerStates[plr]
+        local isSelf=plr==LocalPlayer
+
+        local row=Instance.new("Frame",scroll)
+        row.Name="R_"..plr.Name
+        row.Size=UDim2.new(1,0,0,ROW_H)
+        row.BackgroundColor3=isSelf and Color3.fromRGB(20,28,44) or Color3.fromRGB(22,22,34)
+        row.BorderSizePixel=0; row.LayoutOrder=i
+        row.Visible=playerMatchesQuery(plr,searchQuery)
+        corner(row,8); mkStroke(row,isSelf and Color3.fromRGB(38,60,110) or Color3.fromRGB(38,38,54),1)
+
+        local leftBar=Instance.new("Frame",row)
+        leftBar.Size=UDim2.new(0,3,0,ROW_H-14); leftBar.Position=UDim2.new(0,0,0.5,-(ROW_H-14)/2)
+        leftBar.BackgroundColor3=state.checked and Color3.fromRGB(80,200,120)
+            or (isSelf and Color3.fromRGB(80,120,210) or Color3.fromRGB(40,40,58))
+        leftBar.BorderSizePixel=0; corner(leftBar,2)
+
+        local av=Instance.new("Frame",row)
+        av.Size=UDim2.new(0,28,0,28); av.Position=UDim2.new(0,8,0.5,-14)
+        av.BackgroundColor3=Color3.fromRGB(30,30,46); av.BorderSizePixel=0; corner(av,6)
+        local avImg=Instance.new("ImageLabel",av)
+        avImg.Size=UDim2.new(1,0,1,0); avImg.BackgroundTransparency=1
+        avImg.Image=""; avImg.ScaleType=Enum.ScaleType.Crop; corner(avImg,6)
+        task.spawn(function()
+            local ok,img=pcall(function()
+                return Players:GetUserThumbnailAsync(plr.UserId,
+                    Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size48x48)
+            end)
+            if ok and avImg.Parent then avImg.Image=img end
+        end)
+
+        local displayLbl=Instance.new("TextLabel",row)
+        displayLbl.Size=UDim2.new(1,-95,0,16); displayLbl.Position=UDim2.new(0,44,0,6)
+        displayLbl.BackgroundTransparency=1; displayLbl.Text=plr.DisplayName
+        displayLbl.TextColor3=isSelf and Color3.fromRGB(130,168,245) or Color3.fromRGB(205,204,235)
+        displayLbl.Font=Enum.Font.GothamBold; displayLbl.TextSize=13
+        displayLbl.TextXAlignment=Enum.TextXAlignment.Left; displayLbl.TextTruncate=Enum.TextTruncate.AtEnd
+
+        local usernameLbl=Instance.new("TextLabel",row)
+        usernameLbl.Size=UDim2.new(1,-95,0,13); usernameLbl.Position=UDim2.new(0,44,0,23)
+        usernameLbl.BackgroundTransparency=1
+        usernameLbl.Text=(plr.DisplayName~=plr.Name) and ("@"..plr.Name) or ""
+        usernameLbl.TextColor3=Color3.fromRGB(80,80,110); usernameLbl.Font=Enum.Font.Gotham
+        usernameLbl.TextSize=10; usernameLbl.TextXAlignment=Enum.TextXAlignment.Left
+        usernameLbl.TextTruncate=Enum.TextTruncate.AtEnd
+
+        if isSelf then
+            local youTag=Instance.new("TextLabel",row)
+            youTag.Size=UDim2.new(0,32,0,14); youTag.Position=UDim2.new(0,44,0,23)
+            youTag.BackgroundColor3=Color3.fromRGB(32,45,82); youTag.Text="you"
+            youTag.TextColor3=Color3.fromRGB(100,140,220); youTag.Font=Enum.Font.GothamBold; youTag.TextSize=9
+            corner(youTag,4); displayLbl.Position=UDim2.new(0,44,0,4); usernameLbl.Text=""
+        end
+
+        local SEL_COLOR=Color3.fromRGB(60,190,100)
+        local selBox,selS=makeCheckbox(row,state.checked,SEL_COLOR,-56,function(box,s)
+            if isSelf then return end
+            state.checked=not state.checked; local on=state.checked
+            if on then
+                persistChecked[plr.Name]=true
+                local found=false
+                for _,n in ipairs(checkOrder) do if n==plr.Name then found=true; break end end
+                if not found then table.insert(checkOrder,plr.Name) end
+                if not firstCheckedPlayer then firstCheckedPlayer=plr end
+                if slamActive then slamWasAlive[plr] = nil end
+                if klActive then klWasAlive[plr] = nil end
+            else
+                persistChecked[plr.Name]=nil
+                for i2,n in ipairs(checkOrder) do if n==plr.Name then table.remove(checkOrder,i2); break end end
+                if firstCheckedPlayer==plr then firstCheckedPlayer=resolveFirstChecked() end
+                slamWasAlive[plr] = nil
+                klWasAlive[plr] = nil
+            end
+            box.Text=on and "✓" or ""; box.BackgroundColor3=on and SEL_COLOR or Color3.fromRGB(26,26,40)
+            s.Color=on and SEL_COLOR or Color3.fromRGB(50,50,70)
+            leftBar.BackgroundColor3=on and SEL_COLOR or Color3.fromRGB(40,40,58)
+            updateTpUI()
+            -- ── Only start TP loop if KL is NOT active; KL does its own targeting
+            if on then
+                if not klActive then startTpLoop() end
+            else
+                if #getCheckedPlayers()==0 then
+                    stopTpLoop()
+                    if autoSlapActive then stopAutoSlap() end
+                end
+            end
+        end)
+        selBox.Name="SelBox"
+
+        local SPY_COLOR=Color3.fromRGB(70,140,230)
+        local spyBox,spyS=makeCheckbox(row,state.spectating,SPY_COLOR,-26,function(box,s)
+            if isSelf then return end
+            local turningOn=box.Text~="✓"
+            for p,_ in pairs(playerStates) do
+                if p~=plr then
+                    playerStates[p].spectating=false
+                    local oRow=playerRows[p]
+                    if oRow then
+                        local ob=oRow:FindFirstChild("SpyBox")
+                        if ob then
+                            ob.Text=""; ob.BackgroundColor3=Color3.fromRGB(26,26,40)
+                            local os=ob:FindFirstChildOfClass("UIStroke")
+                            if os then os.Color=Color3.fromRGB(50,50,70) end
+                        end
+                    end
+                end
+            end
+            box.Text=turningOn and "✓" or ""; box.BackgroundColor3=turningOn and SPY_COLOR or Color3.fromRGB(26,26,40)
+            s.Color=turningOn and SPY_COLOR or Color3.fromRGB(50,50,70); state.spectating=turningOn
+            if turningOn then startSpectating(plr) else stopSpectating() end
+            if noTpMode then
+                state.checked=turningOn
+                persistChecked[plr.Name]=turningOn and true or nil
+                local sb=row:FindFirstChild("SelBox")
+                if sb then
+                    local SEL_C=Color3.fromRGB(60,190,100)
+                    sb.Text=turningOn and "✓" or ""; sb.BackgroundColor3=turningOn and SEL_C or Color3.fromRGB(26,26,40)
+                    local ss=sb:FindFirstChildOfClass("UIStroke")
+                    if ss then ss.Color=turningOn and SEL_C or Color3.fromRGB(50,50,70) end
+                end
+                leftBar.BackgroundColor3=turningOn and Color3.fromRGB(60,190,100) or Color3.fromRGB(40,40,58)
+                updateTpUI()
+            end
+        end)
+        spyBox.Name="SpyBox"
+
+        if isSelf then
+            for _,b in ipairs({selBox,spyBox}) do
+                b.BackgroundColor3=Color3.fromRGB(20,20,30); b.TextColor3=Color3.fromRGB(40,40,55)
+            end
+            selS.Color=Color3.fromRGB(30,30,46); spyS.Color=Color3.fromRGB(30,30,46)
+        end
+
+        if not isSelf then
+            row.MouseEnter:Connect(function() tw(row,{BackgroundColor3=Color3.fromRGB(28,28,42)}) end)
+            row.MouseLeave:Connect(function() tw(row,{BackgroundColor3=Color3.fromRGB(22,22,34)}) end)
+        end
+
+        playerRows[plr]=row
+    end
+
+    updateTpUI()
+end
+
+-- ══ SELECT ALL ═════════════════════════════════════════════════════════════
+local SEL_COLOR_ALL=Color3.fromRGB(60,190,100)
+
+local function syncSelAllBtn()
+    local total,selected=0,0
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=LocalPlayer then
+            total=total+1
+            if playerStates[plr] and playerStates[plr].checked then selected=selected+1 end
+        end
+    end
+    allSelected=(total>0 and selected==total)
+    if selected>0 then
+        selCountLbl.Text=tostring(selected)
+        selCountBadge.Size=selected>=10 and UDim2.new(0,34,0,18) or UDim2.new(0,28,0,18)
+        selCountBadge.Visible=true
+    else
+        selCountBadge.Visible=false
+    end
+    if allSelected then
+        selAllBtn.Text="☐  Deselect All"; selAllBtn.TextColor3=Color3.fromRGB(220,100,100)
+        selAllStroke.Color=Color3.fromRGB(140,50,50); tw(selAllBtn,{BackgroundColor3=Color3.fromRGB(44,18,18)})
+        selCountBadge.BackgroundColor3=Color3.fromRGB(160,40,40)
+    else
+        selAllBtn.Text="☑  Select All Players"; selAllBtn.TextColor3=Color3.fromRGB(160,145,230)
+        selAllStroke.Color=Color3.fromRGB(70,55,120); tw(selAllBtn,{BackgroundColor3=Color3.fromRGB(30,26,52)})
+        selCountBadge.BackgroundColor3=Color3.fromRGB(100,60,180)
+    end
+end
+
+selAllBtn.MouseButton1Click:Connect(function()
+    local shouldSelect=not allSelected
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr==LocalPlayer then continue end
+        if not playerStates[plr] then playerStates[plr]={checked=false,spectating=false} end
+        playerStates[plr].checked=shouldSelect
+        persistChecked[plr.Name]=shouldSelect and true or nil
+        if slamActive then slamWasAlive[plr] = nil end
+        if klActive then klWasAlive[plr] = nil end
+        local row=playerRows[plr]
+        if row then
+            local sb=row:FindFirstChild("SelBox")
+            local lb=row:FindFirstChildWhichIsA("Frame")
+            if sb then
+                sb.Text=shouldSelect and "✓" or ""
+                sb.BackgroundColor3=shouldSelect and SEL_COLOR_ALL or Color3.fromRGB(26,26,40)
+                local ss=sb:FindFirstChildOfClass("UIStroke")
+                if ss then ss.Color=shouldSelect and SEL_COLOR_ALL or Color3.fromRGB(50,50,70) end
+            end
+            if lb then lb.BackgroundColor3=shouldSelect and SEL_COLOR_ALL or Color3.fromRGB(40,40,58) end
+        end
+    end
+    allSelected=shouldSelect; selectAllActive=shouldSelect
+    if shouldSelect then
+        checkOrder={}
+        for _,plr in ipairs(Players:GetPlayers()) do
+            if plr~=LocalPlayer then table.insert(checkOrder,plr.Name) end
+        end
+        firstCheckedPlayer=resolveFirstChecked()
+    else
+        checkOrder={}; firstCheckedPlayer=nil
+    end
+    syncSelAllBtn(); updateTpUI()
+    -- Only auto-start TP loop if KL is not active
+    if shouldSelect then
+        if not klActive then startTpLoop() end
+    else
+        stopTpLoop()
+        if autoSlapActive then stopAutoSlap() end
+    end
+end)
+
+-- ══ PLAYER EVENTS — real-time join/leave ═══════════════════════════════════
+Players.PlayerAdded:Connect(function(plr)
+    playerStates[plr]={checked=persistChecked[plr.Name]==true or selectAllActive,spectating=false}
+    refreshPlayerList()
+    syncSelAllBtn()
+    updateTpUI()
+    if (persistChecked[plr.Name] or selectAllActive) and plr~=LocalPlayer then
+        if not klActive then startTpLoop() end
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+    if spectateTarget==plr then stopSpectating() end
+    if firstCheckedPlayer==plr then firstCheckedPlayer=nil end
+    for i,n in ipairs(checkOrder) do if n==plr.Name then table.remove(checkOrder,i); break end end
+    playerStates[plr]=nil
+    slamWasAlive[plr]=nil
+    klWasAlive[plr]=nil
+    if playerRows[plr] then playerRows[plr]:Destroy(); playerRows[plr]=nil end
+    countLbl.Text=tostring(#Players:GetPlayers()).." online"
+    syncSelAllBtn(); updateTpUI()
+end)
+
+-- ══ AIM RAYCAST — runs on Heartbeat, throttled ═════════════════════════════
+local _aimTimer=0
+local _aimParams=RaycastParams.new()
+RunService.Heartbeat:Connect(function(dt)
+    -- ── Aim info update (~20 fps)
+    _aimTimer=_aimTimer+dt
+    if _aimTimer>=0.05 then
+        _aimTimer=0
+        local mousePos=UIS:GetMouseLocation()
+        local found=nil
+        local bestDist=80
+        for _,plr in ipairs(Players:GetPlayers()) do
+            if plr==LocalPlayer then continue end
+            local c=plr.Character
+            local hrp=c and c:FindFirstChild("HumanoidRootPart")
+            if not hrp then continue end
+            local screenPos,onScreen=camera:WorldToViewportPoint(hrp.Position)
+            if not onScreen then continue end
+            local dx=screenPos.X-mousePos.X
+            local dy=screenPos.Y-mousePos.Y
+            local d=math.sqrt(dx*dx+dy*dy)
+            if d<bestDist then bestDist=d; found=plr end
+        end
+        if found~=aimTarget then
+            aimTarget=found
+            if found then
+                aimNameLbl.Text=found.DisplayName
+                aimNameLbl.TextColor3=Color3.fromRGB(255,220,80)
+                mkStroke(aimBox,Color3.fromRGB(160,100,255),1.5)
+            else
+                aimNameLbl.Text="—"
+                aimNameLbl.TextColor3=Color3.fromRGB(160,130,255)
+                mkStroke(aimBox,Color3.fromRGB(55,35,110),1.2)
+            end
+        end
+    end
+
+    -- ── Dist pill + alive dot update (10 fps)
+    _distTimer=_distTimer+dt
+    _dotTimer=_dotTimer+dt
+    if _dotTimer>=0.55 then _dotTimer=0; _dotVisible=not _dotVisible end
+    if _distTimer>=0.1 then _distTimer=0; updateDistPill() end
+end)
+
+-- ══ INIT ═══════════════════════════════════════════════════════════════════
+refreshPlayerList()
+syncSelAllBtn()
