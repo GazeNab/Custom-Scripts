@@ -1,0 +1,228 @@
+--[========================================================================]--
+-- Script Name: UniqueDayNightTrackerGui
+-- Description: Standalone GUI with Day Controller, Night Controller, AND 
+--              Speed Controller textboxes for full cycle calibration.
+--[========================================================================]--
+
+local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- 1. Unique Window Isolation & Cleanup Check
+local UNIQUE_NAME = "UniqueDayNightTrackerGui"
+if PlayerGui:FindFirstChild(UNIQUE_NAME) then
+    PlayerGui[UNIQUE_NAME]:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = UNIQUE_NAME
+screenGui.ResetOnSpawn = false
+screenGui.Parent = PlayerGui
+
+-- 2. Main Frame & Design Configuration (Expanded height for 3 controls)
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 220, 0, 235)
+mainFrame.Position = UDim2.new(0.5, -110, 0.40, 0)
+mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 6)
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(0, 180, 255)
+mainStroke.Thickness = 1.2
+mainStroke.Parent = mainFrame
+
+-- 3. Header Bar
+local headerBar = Instance.new("Frame")
+headerBar.Name = "HeaderBar"
+headerBar.Size = UDim2.new(1, 0, 0, 30)
+headerBar.BackgroundTransparency = 1
+headerBar.Parent = mainFrame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -60, 1, 0)
+titleLabel.Position = UDim2.new(0, 10, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.GothamBlack
+titleLabel.Text = "DAY/NIGHT TRACKER"
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.TextSize = 11
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = headerBar
+
+-- Close Button ("×")
+local closeButton = Instance.new("TextButton")
+closeButton.Size = UDim2.new(0, 25, 0, 25)
+closeButton.Position = UDim2.new(1, -28, 0, 3)
+closeButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+closeButton.Font = Enum.Font.GothamBold
+closeButton.Text = "×"
+closeButton.TextColor3 = Color3.fromRGB(255, 80, 80)
+closeButton.TextSize = 16
+closeButton.Parent = headerBar
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 4)
+closeCorner.Parent = closeButton
+
+closeButton.MouseButton1Click:Connect(function()
+    screenGui:Destroy()
+end)
+
+-- Minimize Button ("-")
+local minimizeButton = Instance.new("TextButton")
+minimizeButton.Size = UDim2.new(0, 25, 0, 25)
+minimizeButton.Position = UDim2.new(1, -56, 0, 3)
+minimizeButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+minimizeButton.Font = Enum.Font.GothamBold
+minimizeButton.Text = "-"
+minimizeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+minimizeButton.TextSize = 14
+minimizeButton.Parent = headerBar
+
+local minimizeCorner = Instance.new("UICorner")
+minimizeCorner.CornerRadius = UDim.new(0, 4)
+minimizeCorner.Parent = minimizeButton
+
+local isMinimized = false
+minimizeButton.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    local targetSize = isMinimized and UDim2.new(0, 220, 0, 30) or UDim2.new(0, 220, 0, 235)
+    TweenService:Create(mainFrame, TweenInfo.new(0.2), {Size = targetSize}):Play()
+end)
+
+-- 4. Content Area Layout
+local contentFrame = Instance.new("Frame")
+contentFrame.Size = UDim2.new(1, -16, 1, -40)
+contentFrame.Position = UDim2.new(0, 8, 0, 35)
+contentFrame.BackgroundTransparency = 1
+contentFrame.Parent = mainFrame
+
+-- State Label (Day / Night)
+local stateLabel = Instance.new("TextLabel")
+stateLabel.Size = UDim2.new(1, 0, 0, 22)
+stateLabel.BackgroundTransparency = 1
+stateLabel.Font = Enum.Font.GothamBold
+stateLabel.Text = "State: Detecting..."
+stateLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+stateLabel.TextSize = 13
+stateLabel.TextXAlignment = Enum.TextXAlignment.Left
+stateLabel.Parent = contentFrame
+
+-- Countdown Label
+local countdownLabel = Instance.new("TextLabel")
+countdownLabel.Size = UDim2.new(1, 0, 0, 32)
+countdownLabel.Position = UDim2.new(0, 0, 0, 22)
+countdownLabel.BackgroundTransparency = 1
+countdownLabel.Font = Enum.Font.GothamBold
+countdownLabel.Text = "Time Left: --:--"
+countdownLabel.TextColor3 = Color3.fromRGB(0, 180, 255)
+countdownLabel.TextSize = 16
+countdownLabel.TextXAlignment = Enum.TextXAlignment.Left
+countdownLabel.Parent = contentFrame
+
+-- ClockTime Readout (MM:SS AM/PM)
+local detailLabel = Instance.new("TextLabel")
+detailLabel.Size = UDim2.new(1, 0, 0, 18)
+detailLabel.Position = UDim2.new(0, 0, 0, 56)
+detailLabel.BackgroundTransparency = 1
+detailLabel.Font = Enum.Font.GothamBold
+detailLabel.Text = "ClockTime: --:-- --"
+detailLabel.TextColor3 = Color3.fromRGB(150, 150, 170)
+detailLabel.TextSize = 11
+detailLabel.TextXAlignment = Enum.TextXAlignment.Left
+detailLabel.Parent = contentFrame
+
+-- Helper Function to Create Setting Rows
+local function createSettingRow(posY, labelText, defaultVal, textColor)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, 0, 0, 24)
+    container.Position = UDim2.new(0, 0, 0, posY)
+    container.BackgroundTransparency = 1
+    container.Parent = contentFrame
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0, 110, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamMedium
+    label.Text = labelText
+    label.TextColor3 = Color3.fromRGB(200, 200, 200)
+    label.TextSize = 11
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = container
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 90, 1, 0)
+    box.Position = UDim2.new(1, -90, 0, 0)
+    box.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    box.Font = Enum.Font.GothamBold
+    box.Text = defaultVal
+    box.TextColor3 = textColor
+    box.TextSize = 12
+    box.Parent = container
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = box
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(60, 60, 75)
+    stroke.Thickness = 1
+    stroke.Parent = box
+
+    return box
+end
+
+-- 5. Build All 3 Control Textboxes
+local dayMultiplierBox   = createSettingRow(78,  "Day Controller:",   "30", Color3.fromRGB(255, 220, 50))
+local nightMultiplierBox = createSettingRow(106, "Night Controller:", "30", Color3.fromRGB(100, 150, 255))
+local speedBox           = createSettingRow(134, "Speed Controller:", "1",  Color3.fromRGB(0, 255, 128))
+
+-- 6. Countdown Engine combining Day, Night, and Speed Modifiers
+RunService.RenderStepped:Connect(function()
+    if not screenGui.Parent then return end
+    
+    local clockTime = Lighting.ClockTime
+    
+    -- Format ClockTime into 12-Hour MM:SS AM/PM
+    local totalMinutes = clockTime * 60
+    local hour24 = math.floor(totalMinutes / 60)
+    local minute = math.floor(totalMinutes % 60)
+    local ampm = hour24 >= 12 and "PM" or "AM"
+    local hour12 = hour24 % 12
+    if hour12 == 0 then hour12 = 12 end
+    
+    detailLabel.Text = string.format("ClockTime: %d:%02d %s", hour12, minute, ampm)
+    
+    local isDay = (clockTime >= 6 and clockTime < 18)
+    stateLabel.Text = "State: " .. (isDay and "☀️ DAY" or "🌙 NIGHT")
+    stateLabel.TextColor3 = isDay and Color3.fromRGB(255, 220, 50) or Color3.fromRGB(100, 150, 255)
+    
+    local targetClock = isDay and 18 or 6
+    local hoursRemaining = targetClock - clockTime
+    if hoursRemaining < 0 then
+        hoursRemaining = hoursRemaining + 24
+    end
+    
+    -- Base phase multiplier
+    local baseMultiplier = isDay and (tonumber(dayMultiplierBox.Text) or 30) or (tonumber(nightMultiplierBox.Text) or 30)
+    -- Overall speed modifier scale
+    local speedScale = tonumber(speedBox.Text) or 1
+    
+    local totalSecs = math.max(0, math.floor(hoursRemaining * baseMultiplier * speedScale))
+    local mins = math.floor(totalSecs / 60)
+    local secs = totalSecs % 60
+    
+    countdownLabel.Text = string.format("To %s: %d:%02d", (isDay and "Night" or "Day"), mins, secs)
+end)
