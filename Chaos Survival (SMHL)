@@ -1,0 +1,3658 @@
+-- Timer Detector + Auto Builder GUI (LocalScript) - MODULAR BUILD SYSTEM - OPTIMIZED
+-- Place inside StarterPlayerScripts
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ============================================
+-- USER CONFIGURABLE VARIABLES
+-- ============================================
+local ITEM_NAME       = "Concrete Wall"
+local PLATFORM_WIDTH  = 35 -- Left/Right
+local PLATFORM_LENGTH = 35 -- Forward/Backward
+local WALL_HEIGHT     = 4
+
+-- ============================================
+-- SHARED STATE
+-- ============================================
+local isPlaying         = false
+local spawningActive    = false
+local isPaused          = false
+local buildInProgress   = false
+local isManualBuild     = false
+local lastTriggerText   = ""
+
+-- Paint Toggle State
+local isPaintEnabled    = true
+local isAnimEnabled     = false
+
+-- Manual Animation State
+local isManualAnimMode  = false
+local manualAnimPattern = 1
+
+-- Wall Selection State (Persists across play/stop)
+local selectedWallType  = nil  -- nil, "1ST", or "2ND"
+
+-- Pause-at-0:02 state
+local pausedAt002       = false
+local buildResumeIndex  = 1
+
+local TARGET_TIMER      = "1:44"
+local PAUSE_TIMER       = "0:02"
+local INCREMENT_TIMER   = "0:00"
+local TIMERV1           = "1:43"
+local TIMERV2           = "0:02"
+local TIMERV3           = "0:30"
+local TIMERV4           = "0:01"
+local Delay             = 0.044
+local tileSize          = 4
+local fixedCenter       = Vector3.new(-5.18, 54.900, 2.2339)
+
+local trackedX          = -6.98999
+local X_INCREMENT       = 0.00001
+local lastIncrementText = ""
+local lastTimerV1Text   = ""
+local lastTimerV2Text   = ""
+local lastTimerV3Text   = ""
+local lastTimerV4Text   = ""
+
+-- ============================================
+-- ANIMATION DUAL-TIMER SYNC STATE
+-- ============================================
+local currentPattern    = 1
+local TOTAL_PATTERNS    = 100
+local v3Fired           = false
+local v4Fired           = false
+
+-- ============================================
+-- OPTIMIZATION: CACHING & DEBOUNCING
+-- ============================================
+local cachedExisting    = {}
+local lastPaintTime     = 0
+local PAINT_DEBOUNCE    = 0.1  -- Minimum 0.1 seconds between full paint scans
+local lastSnapshotTime  = 0
+local SNAPSHOT_CACHE_TIME = 0.05  -- Cache snapshot for 50ms
+
+-- ============================================
+-- COLORS
+-- ============================================
+local PAINT_COLOR = Color3.fromRGB(0, 0, 255)
+local CHESS_WHITE  = Color3.new(1, 1, 1)
+local CHESS_BLACK  = Color3.new(0, 0, 0)
+
+-- ============================================
+-- REMOTES
+-- ============================================
+local buildRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("RequestBuild")
+local paintRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PaintBuild")
+
+-- ============================================
+-- BUILD PATTERNS TABLE (Like animationPatterns)
+-- ============================================
+local buildPatterns = {
+	-- BUILD 1: PLATFORM FLOOR
+	function(width, length, baseX, baseY, baseZ, tileSize)
+		local tiles = {}
+		local gridInfo = {}
+		
+		local function getSpiralPositions(w, l)
+			local positions = {}
+			local visited = {}
+			for i = 0, w - 1 do
+				visited[i] = {}
+				for j = 0, l - 1 do
+					visited[i][j] = false
+				end
+			end
+
+			local centerX = math.floor((w - 1) / 2)
+			local centerZ = math.floor((l - 1) / 2)
+			local x, z = centerX, centerZ
+
+			table.insert(positions, {x, z})
+			visited[x][z] = true
+
+			local directions = {{1, 0}, {0, 1}, {-1, 0}, {0, -1}}
+			local dir = 1
+			local steps = 1
+
+			while #positions < w * l do
+				for _ = 1, 2 do
+					for _ = 1, steps do
+						x = x + directions[dir][1]
+						z = z + directions[dir][2]
+						if x >= 0 and x < w and z >= 0 and z < l and not visited[x][z] then
+							table.insert(positions, {x, z})
+							visited[x][z] = true
+						end
+					end
+					dir = dir % 4 + 1
+				end
+				steps = steps + 1
+			end
+
+			return positions
+		end
+
+		local spiralOrder = getSpiralPositions(width, length)
+		for _, coord in ipairs(spiralOrder) do
+			local gx = coord[1]
+			local gz = coord[2]
+			local offsetX = (gx - (width - 1) / 2) * tileSize
+			local offsetZ = (gz - (length - 1) / 2) * tileSize
+			local cf = CFrame.new(baseX + offsetX, baseY, baseZ + offsetZ)
+			table.insert(tiles, { blockType = ITEM_NAME, cf = cf })
+			
+			local key = math.round(cf.Position.X * 10) .. "_" .. math.round(cf.Position.Y * 10) .. "_" .. math.round(cf.Position.Z * 10)
+			gridInfo[key] = {gx = gx, gz = gz}
+		end
+		
+		return tiles, gridInfo, true -- returns: tiles, gridInfo, isPlatform
+	end,
+
+	-- BUILD 2: WALLS (1ST WALLS - Staircase/Outward)
+	function(width, length, baseX, baseY, baseZ, tileSize, wallHeight)
+		local tiles = {}
+		
+		for h = 1, wallHeight do
+			local wallY = baseY + h * tileSize
+			local push = (h - 1) * tileSize
+
+			local halfW = ((width - 1) / 2) * tileSize
+			local halfL = ((length - 1) / 2) * tileSize
+
+			-- Front wall (Z+)
+			for gx = 0, width - 1 do
+				local offsetX = (gx - (width - 1) / 2) * tileSize
+				local offsetZ = halfL + push
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Back wall (Z-)
+			for gx = 0, width - 1 do
+				local offsetX = (gx - (width - 1) / 2) * tileSize
+				local offsetZ = -halfL - push
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Right wall (X+)
+			for gz = 0, length - 1 do
+				local offsetX = halfW + push
+				local offsetZ = (gz - (length - 1) / 2) * tileSize
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Left wall (X-)
+			for gz = 0, length - 1 do
+				local offsetX = -halfW - push
+				local offsetZ = (gz - (length - 1) / 2) * tileSize
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Corner gap fills
+			for step = 1, push / tileSize do
+				local cornerPush = step * tileSize
+				local corners = {
+					{halfW + cornerPush,  halfL + push},
+					{halfW + push,        halfL + cornerPush},
+					{-halfW - cornerPush, halfL + push},
+					{-halfW - push,       halfL + cornerPush},
+					{halfW + cornerPush,  -halfL - push},
+					{halfW + push,        -halfL - cornerPush},
+					{-halfW - cornerPush, -halfL - push},
+					{-halfW - push,       -halfL - cornerPush},
+				}
+				for _, corner in ipairs(corners) do
+					table.insert(tiles, {
+						blockType = ITEM_NAME,
+						cf = CFrame.new(baseX + corner[1], wallY, baseZ + corner[2])
+					})
+				end
+			end
+		end
+		
+		return tiles, nil, false -- returns: tiles, gridInfo, isPlatform
+	end,
+
+	-- BUILD 3: WALLS (2ND WALLS - Simple Stacking/Layered)
+	function(width, length, baseX, baseY, baseZ, tileSize, wallHeight)
+		local tiles = {}
+		
+		local halfW = ((width - 1) / 2) * tileSize
+		local halfL = ((length - 1) / 2) * tileSize
+
+		for h = 1, wallHeight do
+			local wallY = baseY + h * tileSize
+
+			-- Front wall (Z+) - stacks directly above
+			for gx = 0, width - 1 do
+				local offsetX = (gx - (width - 1) / 2) * tileSize
+				local offsetZ = halfL
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Back wall (Z-) - stacks directly above
+			for gx = 0, width - 1 do
+				local offsetX = (gx - (width - 1) / 2) * tileSize
+				local offsetZ = -halfL
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Right wall (X+) - stacks directly above
+			for gz = 0, length - 1 do
+				local offsetX = halfW
+				local offsetZ = (gz - (length - 1) / 2) * tileSize
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Left wall (X-) - stacks directly above
+			for gz = 0, length - 1 do
+				local offsetX = -halfW
+				local offsetZ = (gz - (length - 1) / 2) * tileSize
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + offsetX, wallY, baseZ + offsetZ)
+				})
+			end
+
+			-- Corner fills - stacks directly above (no outward push)
+			local corners = {
+				{halfW,  halfL},
+				{-halfW, halfL},
+				{halfW,  -halfL},
+				{-halfW, -halfL},
+			}
+			for _, corner in ipairs(corners) do
+				table.insert(tiles, {
+					blockType = ITEM_NAME,
+					cf = CFrame.new(baseX + corner[1], wallY, baseZ + corner[2])
+				})
+			end
+		end
+		
+		return tiles, nil, false -- returns: tiles, gridInfo, isPlatform
+	end,
+}
+
+local TOTAL_BUILDS = #buildPatterns
+
+-- ============================================
+-- MASTER BLUEPRINT COMPILATION & AUTO REPAIR HANDLER
+-- ============================================
+blueprint = {}
+platformKeySet = {}
+
+local function generateBlueprint()
+	blueprint = {}
+	platformKeySet = {}
+
+	-- Only include selected wall type if one is chosen
+	local buildsToGenerate = {1}  -- Always include platform
+	if selectedWallType == "1ST" then
+		table.insert(buildsToGenerate, 2)
+	elseif selectedWallType == "2ND" then
+		table.insert(buildsToGenerate, 3)
+	end
+
+	-- Auto-adapt: iterate through selected builds
+	for _, buildIndex in ipairs(buildsToGenerate) do
+		local buildFunc = buildPatterns[buildIndex]
+		
+		if buildFunc then
+			local tiles, gridInfo, isPlatform
+			
+			-- Call build function with appropriate parameters based on index
+			if buildIndex == 1 then
+				-- BUILD 1: Platform Floor
+				tiles, gridInfo, isPlatform = buildFunc(PLATFORM_WIDTH, PLATFORM_LENGTH, trackedX, fixedCenter.Y, fixedCenter.Z, tileSize)
+			elseif buildIndex == 2 or buildIndex == 3 then
+				-- BUILD 2 or 3: Walls (1ST or 2ND)
+				tiles, gridInfo, isPlatform = buildFunc(PLATFORM_WIDTH, PLATFORM_LENGTH, trackedX, fixedCenter.Y, fixedCenter.Z, tileSize, WALL_HEIGHT)
+			else
+				-- Additional builds
+				tiles, gridInfo, isPlatform = buildFunc(PLATFORM_WIDTH, PLATFORM_LENGTH, trackedX, fixedCenter.Y, fixedCenter.Z, tileSize)
+			end
+			
+			-- Compile tiles into master blueprint
+			if tiles then
+				for _, tile in ipairs(tiles) do
+					table.insert(blueprint, tile)
+					
+					-- Register platform grid info if this is a platform build
+					if isPlatform and gridInfo then
+						local key = math.round(tile.cf.Position.X * 10) .. "_" .. math.round(tile.cf.Position.Y * 10) .. "_" .. math.round(tile.cf.Position.Z * 10)
+						platformKeySet[key] = gridInfo[key]
+					end
+				end
+			end
+		end
+	end
+end
+
+-- ============================================
+-- ANIMATION PATTERNS TABLE
+-- ============================================
+local animationPatterns = {
+	-- Pattern 1: Classic Chessboard
+	function(gx, gz, width, length)
+		if (gx + gz) % 2 == 0 then
+			return CHESS_WHITE
+		else
+			return CHESS_BLACK
+		end
+	end,
+
+	-- Pattern 2: Concentric Rings / Target
+    function(gx, gz, width, length)
+        local cx, cz = width / 2, length / 2
+        local distance = math.floor(math.sqrt((gx - cx)^2 + (gz - cz)^2))
+        return (distance % 2 == 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 3: Diagonal Stripes
+    function(gx, gz, width, length)
+        return ((gx + gz) % 4 < 2) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 4: Horizontal Stripes
+    function(gx, gz, width, length)
+        return (gz % 2 == 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 5: Vertical Stripes
+    function(gx, gz, width, length)
+        return (gx % 2 == 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+	-- Pattern 6: Center Diamond / Manhattan Distance
+    function(gx, gz, width, length)
+        local cx, cz = width / 2, length / 2
+        local manhattanDist = math.abs(gx - cx) + math.abs(gz - cz)
+        return (math.floor(manhattanDist) % 2 == 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 7: Corner Borders / Outward Frames
+    function(gx, gz, width, length)
+        local distFromEdge = math.min(gx, gz, width - 1 - gx, length - 1 - gz)
+        return (distFromEdge % 2 == 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 8: 2x2 Sub-Grid Block Clusters
+    function(gx, gz, width, length)
+        local blockX = math.floor(gx / 2)
+        local blockZ = math.floor(gz / 2)
+        return ((blockX + blockZ) % 2 == 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 9: Sine Wave / Ripple
+    function(gx, gz, width, length)
+        local cx, cz = width / 2, length / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local wave = math.sin(dist * 0.8)
+        return (wave > 0) and CHESS_WHITE or CHESS_BLACK
+    end,
+
+    -- Pattern 10: Crosshair / Axis Divide
+    function(gx, gz, width, length)
+        local midX = math.floor(width / 2)
+        local midZ = math.floor(length / 2)
+        if gx == midX or gz == midZ then
+            return CHESS_WHITE
+        else
+            return CHESS_BLACK
+        end
+    end,
+
+	-- Pattern 11: Radial Circular Target
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local dist = math.floor(math.sqrt((gx - cx)^2 + (gz - cz)^2))
+		local colors = {
+			Color3.fromRGB(180, 50, 230),
+			Color3.fromRGB(100, 20, 150),
+			Color3.fromRGB(230, 150, 255)
+		}
+		return colors[(dist % #colors) + 1]
+	end,
+
+	-- Pattern 12: Four Quadrants
+	function(gx, gz, width, length)
+		local midX, midZ = width / 2, length / 2
+		if gx < midX and gz < midZ then
+			return Color3.fromRGB(240, 70, 70)   -- Top-Left Red
+		elseif gx >= midX and gz < midZ then
+			return Color3.fromRGB(70, 240, 70)   -- Top-Right Green
+		elseif gx < midX and gz >= midZ then
+			return Color3.fromRGB(70, 70, 240)   -- Bottom-Left Blue
+		else
+			return Color3.fromRGB(240, 240, 70)  -- Bottom-Right Yellow
+		end
+	end,
+
+	-- Pattern 13: Diagonal Cross / X-Shape
+	function(gx, gz, width, length)
+		local normalizedX = gx / (width - 1)
+		local normalizedZ = gz / (length - 1)
+		if math.abs(normalizedX - normalizedZ) < 0.15 or math.abs(normalizedX - (1 - normalizedZ)) < 0.15 then
+			return Color3.fromRGB(255, 215, 0)
+		else
+			return Color3.fromRGB(50, 20, 80)
+		end
+	end,
+
+	-- Pattern 14: Polka Dots Matrix
+	function(gx, gz, width, length)
+		if gx % 3 == 1 and gz % 3 == 1 then
+			return Color3.fromRGB(255, 50, 100)
+		else
+			return Color3.fromRGB(240, 240, 245)
+		end
+	end,
+
+	-- Pattern 15: Rainbow Angular Sweep
+	function(gx, gz, width, length)
+		local angle = math.atan2(gz - (length / 2), gx - (width / 2))
+		local hue = (angle + math.pi) / (2 * math.pi)
+		return Color3.fromHSV(hue, 0.8, 0.9)
+	end,
+
+	-- Pattern 16: Interlocking Spiral Pattern
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+		local angle = math.atan2(gz - cz, gx - cx)
+		local spiralVal = math.floor(dist + (angle * 2)) % 2
+		if spiralVal == 0 then
+			return Color3.fromRGB(0, 180, 130)
+		else
+			return Color3.fromRGB(15, 40, 35)
+		end
+	end,
+
+	-- Pattern 17: Corner Starburst
+	function(gx, gz, width, length)
+		local distTL = math.sqrt(gx^2 + gz^2)
+		local distBR = math.sqrt(((width - 1) - gx)^2 + ((length - 1) - gz)^2)
+		if math.floor(distTL) % 2 == 0 or math.floor(distBR) % 2 == 0 then
+			return Color3.fromRGB(255, 120, 50)
+		else
+			return Color3.fromRGB(30, 10, 40)
+		end
+	end,
+
+	-- Pattern 18: Random Pixel Matrix
+	function(gx, gz, width, length)
+		local seed = (gx * 73 + gz * 179) % 255
+		if seed > 128 then
+			return Color3.fromRGB(0, 255, 100)
+		else
+			return Color3.fromRGB(0, 40, 10)
+		end
+	end,
+
+	-- Pattern 19: Triangular Split
+	function(gx, gz, width, length)
+		if gx > gz then
+			return Color3.fromRGB(230, 80, 150)
+		else
+			return Color3.fromRGB(80, 150, 230)
+		end
+	end,
+
+	-- Pattern 20: Checkerboard with Inverted Inset
+	function(gx, gz, width, length)
+		local isBorder = (gx == 0 or gz == 0 or gx == width - 1 or gz == length - 1)
+		local isChecker = (gx + gz) % 2 == 0
+		if isBorder then
+			return isChecker and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(0, 0, 0)
+		else
+			return isChecker and Color3.fromRGB(50, 50, 50) or Color3.fromRGB(200, 200, 200)
+		end
+	end,
+
+	-- Pattern 21: Concentric Diamonds
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local dist = math.abs(gx - cx) + math.abs(gz - cz)
+		return (math.floor(dist) % 2 == 0) and Color3.fromRGB(0, 220, 200) or Color3.fromRGB(10, 50, 60)
+	end,
+
+	-- Pattern 22: Corner Inverted Quadrants
+	function(gx, gz, width, length)
+		local midX, midZ = width / 2, length / 2
+		local isWhite = ((gx < midX and gz < midZ) or (gx >= midX and gz >= midZ))
+		return isWhite and CHESS_WHITE or CHESS_BLACK
+	end,
+
+	-- Pattern 23: Horizontal Wave Band
+	function(gx, gz, width, length)
+		local wave = math.sin((gx / width) * math.pi * 2) * (length / 4)
+		local targetZ = math.floor((length / 2) + wave)
+		if math.abs(gz - targetZ) <= 1 then
+			return Color3.fromRGB(255, 165, 0)
+		else
+			return Color3.fromRGB(20, 20, 30)
+		end
+	end,
+
+	-- Pattern 24: 3x3 Large Checkers
+	function(gx, gz, width, length)
+		local bx = math.floor(gx / 3)
+		local bz = math.floor(gz / 3)
+		return ((bx + bz) % 2 == 0) and Color3.fromRGB(150, 80, 220) or Color3.fromRGB(40, 20, 60)
+	end,
+
+	-- Pattern 25: Perimeter Frame Sequence
+	function(gx, gz, width, length)
+		local depth = math.min(gx, gz, (width - 1) - gx, (length - 1) - gz)
+		local frameColors = {
+			Color3.fromRGB(255, 0, 80),
+			Color3.fromRGB(0, 255, 150),
+			Color3.fromRGB(0, 150, 255),
+			Color3.fromRGB(255, 200, 0),
+		}
+		return frameColors[(depth % #frameColors) + 1]
+	end,
+
+	-- Pattern 26: Hyperbolic Cross
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local val = math.abs((gx - cx) * (gz - cz))
+		return (val % 4 < 2) and Color3.fromRGB(255, 90, 90) or Color3.fromRGB(30, 30, 50)
+	end,
+
+	-- Pattern 27: Center Outward Spiral
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local radius = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+		local angle = math.atan2(gz - cz, gx - cx)
+		local check = math.floor(radius * 1.5 + angle * (3 / math.pi)) % 2
+		return (check == 0) and Color3.fromRGB(255, 255, 100) or Color3.fromRGB(100, 50, 0)
+	end,
+
+	-- Pattern 28: Alternating Row Shifts
+	function(gx, gz, width, length)
+		local shift = (gz % 2 == 0) and 0 or 1
+		return ((gx + shift) % 2 == 0) and Color3.fromRGB(80, 200, 120) or Color3.fromRGB(20, 60, 40)
+	end,
+
+	-- Pattern 29: Concentric Rings (3-Color Cycle)
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local dist = math.floor(math.sqrt((gx - cx)^2 + (gz - cz)^2))
+		local ring = dist % 3
+		if ring == 0 then
+			return Color3.fromRGB(255, 70, 70)
+		elseif ring == 1 then
+			return Color3.fromRGB(255, 255, 255)
+		else
+			return Color3.fromRGB(70, 70, 255)
+		end
+	end,
+
+	-- Pattern 30: Corner Vignette Fade
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local maxDist = math.sqrt(cx^2 + cz^2)
+		local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+		local factor = 1 - math.min(1, dist / maxDist)
+		return Color3.fromRGB(math.floor(factor * 255), math.floor(factor * 200), math.floor(factor * 255))
+	end,
+
+	-- Pattern 31: Pulsing Pulsar / Radio Wave
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+		local pulse = math.floor(dist * 1.5 - (gx + gz) * 0.2) % 3
+		if pulse == 0 then return Color3.fromRGB(255, 0, 128)
+		elseif pulse == 1 then return Color3.fromRGB(0, 255, 200)
+		else return Color3.fromRGB(20, 20, 40) end
+	end,
+
+	-- Pattern 32: Asymmetric Diagonal Wave
+	function(gx, gz, width, length)
+		local val = math.sin((gx * 0.5) + (gz * 0.3))
+		return (val > 0) and Color3.fromRGB(255, 180, 0) or Color3.fromRGB(80, 0, 120)
+	end,
+
+	-- Pattern 33: Voronoi Cell Illusion
+	function(gx, gz, width, length)
+		local p1 = math.sqrt((gx - width * 0.25)^2 + (gz - length * 0.25)^2)
+		local p2 = math.sqrt((gx - width * 0.75)^2 + (gz - length * 0.75)^2)
+		return (p1 < p2) and Color3.fromRGB(0, 190, 255) or Color3.fromRGB(255, 90, 140)
+	end,
+
+	-- Pattern 34: Concentric Octagon Ring
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local octDist = math.max(math.abs(gx - cx), math.abs(gz - cz), (math.abs(gx - cx) + math.abs(gz - cz)) * 0.707)
+		return (math.floor(octDist) % 2 == 0) and Color3.fromRGB(240, 220, 100) or Color3.fromRGB(30, 40, 60)
+	end,
+
+	-- Pattern 35: Cyberpunk Neon Grid Lines
+	function(gx, gz, width, length)
+		local isGrid = (gx % 4 == 0) or (gz % 4 == 0)
+		return isGrid and Color3.fromRGB(0, 255, 230) or Color3.fromRGB(15, 10, 25)
+	end,
+
+	-- Pattern 36: Double Helix Intersection
+	function(gx, gz, width, length)
+		local h1 = math.sin(gx * 0.6) * (length / 3) + (length / 2)
+		local h2 = math.cos(gx * 0.6) * (length / 3) + (length / 2)
+		if math.abs(gz - h1) < 1 then return Color3.fromRGB(255, 50, 50) end
+		if math.abs(gz - h2) < 1 then return Color3.fromRGB(50, 150, 255) end
+		return Color3.fromRGB(10, 15, 25)
+	end,
+
+	-- Pattern 37: Stepped Diamond Gradient
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local d = math.abs(gx - cx) + math.abs(gz - cz)
+		local val = math.clamp(1 - (d / (cx + cz)), 0, 1)
+		return Color3.fromRGB(math.floor(val * 255), math.floor(val * 100), math.floor(val * 50))
+	end,
+
+	-- Pattern 38: Interlocking Brick Pattern
+	function(gx, gz, width, length)
+		local row = math.floor(gz / 2)
+		local offset = (row % 2 == 0) and 0 or 2
+		local col = math.floor((gx + offset) / 4)
+		return ((row + col) % 2 == 0) and Color3.fromRGB(180, 80, 50) or Color3.fromRGB(110, 45, 30)
+	end,
+
+	-- Pattern 39: Optical Illusion Twill
+	function(gx, gz, width, length)
+		local pattern = (gx * 2 + gz * 3) % 5
+		if pattern < 2 then return Color3.fromRGB(240, 240, 240)
+		elseif pattern < 4 then return Color3.fromRGB(40, 40, 40)
+		else return Color3.fromRGB(200, 50, 50) end
+	end,
+
+	-- Pattern 40: Four Corner Vortex
+	function(gx, gz, width, length)
+		local a1 = math.atan2(gz, gx)
+		local a2 = math.atan2((length - 1) - gz, (width - 1) - gx)
+		local combo = math.floor((a1 + a2) * 3) % 2
+		return (combo == 0) and Color3.fromRGB(140, 255, 90) or Color3.fromRGB(40, 30, 80)
+	end,
+
+	-- Pattern 41: Offset Checker Rows (Knight Moves)
+	function(gx, gz, width, length)
+		local val = (gx * 1 + gz * 2) % 3
+		if val == 0 then return Color3.fromRGB(255, 100, 100)
+		elseif val == 1 then return Color3.fromRGB(100, 255, 100)
+		else return Color3.fromRGB(100, 100, 255) end
+	end,
+
+	-- Pattern 42: Spiral Galaxy Arms
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local r = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+		local theta = math.atan2(gz - cz, gx - cx)
+		local arm = math.sin(theta * 3 - r * 0.8)
+		return (arm > 0) and Color3.fromRGB(180, 100, 255) or Color3.fromRGB(20, 10, 40)
+	end,
+
+	-- Pattern 43: Hourglass Split
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local inX = math.abs(gx - cx)
+		local inZ = math.abs(gz - cz)
+		return (inX <= inZ) and Color3.fromRGB(255, 200, 80) or Color3.fromRGB(40, 80, 120)
+	end,
+
+	-- Pattern 44: Tartan / Plaid Matrix
+	function(gx, gz, width, length)
+		local xMatch = (gx % 4 < 2)
+		local zMatch = (gz % 4 < 2)
+		if xMatch and zMatch then return Color3.fromRGB(220, 40, 40)
+		elseif xMatch or zMatch then return Color3.fromRGB(40, 180, 80)
+		else return Color3.fromRGB(20, 40, 90) end
+	end,
+
+	-- Pattern 45: Ripple Tank Interference
+	function(gx, gz, width, length)
+		local d1 = math.sqrt((gx - width * 0.3)^2 + (gz - length * 0.5)^2)
+		local d2 = math.sqrt((gx - width * 0.7)^2 + (gz - length * 0.5)^2)
+		local wave = math.sin(d1 * 1.2) + math.sin(d2 * 1.2)
+		return (wave > 0) and Color3.fromRGB(80, 220, 240) or Color3.fromRGB(15, 30, 60)
+	end,
+
+	-- Pattern 46: Radial Target Pulse
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local d = math.floor(math.sqrt((gx - cx)^2 + (gz - cz)^2))
+		return (d % 4 == 0) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(230, 30, 30)
+	end,
+
+	-- Pattern 47: Sierpinski Gasket Style XOR
+	function(gx, gz, width, length)
+		local xorVal = bit32.bxor(gx, gz) % 4
+		return (xorVal == 0) and Color3.fromRGB(255, 160, 0) or Color3.fromRGB(30, 20, 50)
+	end,
+
+	-- Pattern 48: Pinwheel Rotational Blades
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local angle = math.atan2(gz - cz, gx - cx)
+		local blade = math.floor((angle + math.pi) / (math.pi / 4)) % 2
+		return (blade == 0) and Color3.fromRGB(255, 230, 60) or Color3.fromRGB(30, 160, 220)
+	end,
+
+	-- Pattern 49: Concentric Squared Framing
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local ring = math.max(math.floor(math.abs(gx - cx)), math.floor(math.abs(gz - cz)))
+		local palette = {
+			Color3.fromRGB(255, 80, 80),
+			Color3.fromRGB(80, 255, 80),
+			Color3.fromRGB(80, 80, 255),
+			Color3.fromRGB(255, 255, 80)
+		}
+		return palette[(ring % #palette) + 1]
+	end,
+
+	-- Pattern 50: Glitch Noise Stripes
+	function(gx, gz, width, length)
+		local noise = (gx * 37 + gz * 91) % 7
+		if noise == 0 then return Color3.fromRGB(255, 0, 80)
+		elseif noise == 1 then return Color3.fromRGB(0, 255, 120)
+		else return Color3.fromRGB(20, 20, 30) end
+	end,
+
+	-- Pattern 51: Central Concentric Starburst
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local dx, dz = math.abs(gx - cx), math.abs(gz - cz)
+		local star = math.floor(dx * dz) % 2
+		return (star == 0) and Color3.fromRGB(255, 140, 200) or Color3.fromRGB(50, 10, 40)
+	end,
+
+	-- Pattern 52: Diagonal Sawtooth Bands
+	function(gx, gz, width, length)
+		local saw = (gx + gz * 2) % 6
+		return (saw < 3) and Color3.fromRGB(255, 110, 40) or Color3.fromRGB(40, 100, 120)
+	end,
+
+	-- Pattern 53: Vertical Chevron V-Shapes
+	function(gx, gz, width, length)
+		local vPos = math.abs(gx - (width / 2)) + gz
+		return (math.floor(vPos) % 2 == 0) and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(20, 40, 50)
+	end,
+
+	-- Pattern 54: Nested Concentric Elliptic Rings
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local el = math.floor(math.sqrt(((gx - cx)^2) * 1.5 + ((gz - cz)^2) * 0.7))
+		return (el % 2 == 0) and Color3.fromRGB(160, 255, 220) or Color3.fromRGB(60, 40, 90)
+	end,
+
+	-- Pattern 55: Diagonal Step Pyramid
+	function(gx, gz, width, length)
+		local step = math.floor(gx / 2) + math.floor(gz / 2)
+		return (step % 2 == 0) and Color3.fromRGB(230, 180, 120) or Color3.fromRGB(90, 60, 40)
+	end,
+
+	-- Pattern 56: Cross-Hatch Web
+	function(gx, gz, width, length)
+		local line1 = (gx + gz) % 3 == 0
+		local line2 = (gx - gz) % 3 == 0
+		if line1 and line2 then return Color3.fromRGB(255, 255, 255)
+		elseif line1 or line2 then return Color3.fromRGB(150, 50, 200)
+		else return Color3.fromRGB(20, 15, 30) end
+	end,
+
+	-- Pattern 57: Corner Gradient Steps
+	function(gx, gz, width, length)
+		local dist = (gx + gz) / (width + length - 2)
+		local level = math.floor(dist * 5) / 5
+		return Color3.fromRGB(math.floor(level * 255), math.floor((1 - level) * 255), 180)
+	end,
+
+	-- Pattern 58: Expanding Square Rings
+	function(gx, gz, width, length)
+		local cx, cz = (width - 1) / 2, (length - 1) / 2
+		local box = math.max(math.abs(gx - cx), math.abs(gz - cz))
+		return (math.floor(box) % 2 == 0) and Color3.fromRGB(255, 90, 0) or Color3.fromRGB(255, 255, 255)
+	end,
+
+	-- Pattern 59: Modulo Grid Weave
+	function(gx, gz, width, length)
+		local weave = (gx * gz) % 5
+		return (weave < 2) and Color3.fromRGB(0, 180, 255) or Color3.fromRGB(10, 30, 50)
+	end,
+
+	-- Pattern 60: Triple Striped Offset
+	function(gx, gz, width, length)
+		local stripe = (gx + math.floor(gz / 3)) % 3
+		if stripe == 0 then return Color3.fromRGB(255, 60, 120)
+		elseif stripe == 1 then return Color3.fromRGB(255, 220, 60)
+		else return Color3.fromRGB(60, 120, 255) end
+	end,
+
+	-- Pattern 61: Pulsing Heart Shape
+    function(gx, gz, width, length)
+        local x = (gx - (width - 1) / 2) / (width / 2) * 1.3
+        local z = ((length - 1) - gz - (length / 2)) / (length / 2) * 1.3
+        local eq = (x^2 + z^2 - 1)^3 - (x^2) * (z^3)
+        if eq <= 0 then
+            return Color3.fromRGB(255, 30, 80)
+        else
+            return Color3.fromRGB(20, 10, 25)
+        end
+    end,
+
+    -- Pattern 62: Intersecting Sine Waves
+    function(gx, gz, width, length)
+        local wave1 = math.sin(gx * 0.8)
+        local wave2 = math.cos(gz * 0.8)
+        return (wave1 + wave2 > 0) and Color3.fromRGB(0, 230, 255) or Color3.fromRGB(10, 30, 60)
+    end,
+
+    -- Pattern 63: Diagonal Gradient Steps
+    function(gx, gz, width, length)
+        local step = math.floor(((gx + gz) / (width + length)) * 6)
+        local palette = {
+            Color3.fromRGB(30, 0, 50),
+            Color3.fromRGB(90, 0, 120),
+            Color3.fromRGB(160, 20, 120),
+            Color3.fromRGB(220, 70, 90),
+            Color3.fromRGB(255, 140, 60),
+            Color3.fromRGB(255, 220, 100),
+        }
+        return palette[math.clamp(step + 1, 1, #palette)]
+    end,
+
+    -- Pattern 64: Zig-Zag Chevron Bands
+    function(gx, gz, width, length)
+        local offset = math.abs((gx % 4) - 2)
+        return ((gz + offset) % 3 == 0) and Color3.fromRGB(255, 180, 0) or Color3.fromRGB(40, 25, 10)
+    end,
+
+    -- Pattern 65: Optical Illusion Expanding Rings
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local band = math.floor(dist * 1.2) % 3
+        local checker = (gx + gz) % 2 == 0
+        if band == 0 then
+            return checker and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(0, 0, 0)
+        elseif band == 1 then
+            return Color3.fromRGB(255, 0, 100)
+        else
+            return Color3.fromRGB(0, 200, 255)
+        end
+    end,
+
+    -- Pattern 66: Double Helix Alignment
+    function(gx, gz, width, length)
+        local strand1 = math.floor((length / 2) + math.sin(gx * 0.5) * (length / 3))
+        local strand2 = math.floor((length / 2) - math.sin(gx * 0.5) * (length / 3))
+        if gz == strand1 then
+            return Color3.fromRGB(0, 255, 150)
+        elseif gz == strand2 then
+            return Color3.fromRGB(255, 50, 150)
+        else
+            return Color3.fromRGB(15, 20, 30)
+        end
+    end,
+
+    -- Pattern 67: Stepped Diamond Inset
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.abs(gx - cx) + math.abs(gz - cz)
+        local tier = math.floor(dist) % 4
+        if tier == 0 then
+            return Color3.fromRGB(255, 215, 0)
+        elseif tier == 1 then
+            return Color3.fromRGB(180, 150, 0)
+        elseif tier == 2 then
+            return Color3.fromRGB(100, 80, 0)
+        else
+            return Color3.fromRGB(20, 20, 20)
+        end
+    end,
+
+    -- Pattern 68: Triangular Hourglass Split
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local relX = gx - cx
+        local relZ = gz - cz
+        if math.abs(relX) >= math.abs(relZ) then
+            return Color3.fromRGB(255, 80, 80)
+        else
+            return Color3.fromRGB(80, 180, 255)
+        end
+    end,
+
+    -- Pattern 69: Logarithmic Spiral
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local r = math.sqrt((gx - cx)^2 + (gz - cz)^2) + 0.1
+        local theta = math.atan2(gz - cz, gx - cx)
+        local val = math.floor(math.log(r) * 3 + theta * 1.5) % 2
+        return (val == 0) and Color3.fromRGB(140, 255, 0) or Color3.fromRGB(30, 50, 10)
+    end,
+
+    -- Pattern 70: Digital Noise Threshold Matrix
+    function(gx, gz, width, length)
+        local hash = (gx * 374761393 + gz * 668265263) % 2147483647
+        local val = (hash % 100) / 100
+        if val > 0.7 then
+            return Color3.fromRGB(0, 255, 200)
+        elseif val > 0.4 then
+            return Color3.fromRGB(0, 120, 180)
+        else
+            return Color3.fromRGB(10, 15, 30)
+        end
+    end,
+
+    -- Pattern 71: Brick Wall Stagger
+    function(gx, gz, width, length)
+        local isMortarRow = (gz % 3 == 0)
+        local rowOffset = math.floor(gz / 3) % 2 == 0 and 0 or 2
+        local isMortarCol = ((gx + rowOffset) % 4 == 0)
+        if isMortarRow or isMortarCol then
+            return Color3.fromRGB(200, 200, 200)
+        else
+            return Color3.fromRGB(180, 60, 40)
+        end
+    end,
+
+    -- Pattern 72: Voronoi-Style Modular Cells
+    function(gx, gz, width, length)
+        local cellX = math.floor(gx / 3)
+        local cellZ = math.floor(gz / 3)
+        local colorSeed = (cellX * 13 + cellZ * 29) % 5
+        local palette = {
+            Color3.fromRGB(230, 50, 50),
+            Color3.fromRGB(230, 150, 50),
+            Color3.fromRGB(50, 200, 150),
+            Color3.fromRGB(50, 100, 230),
+            Color3.fromRGB(180, 50, 230)
+        }
+        return palette[colorSeed + 1]
+    end,
+
+    -- Pattern 73: Concentric Octagons
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dx = math.abs(gx - cx)
+        local dz = math.abs(gz - cz)
+        local octDist = math.max(dx, dz) + math.min(dx, dz) * 0.5
+        return (math.floor(octDist) % 2 == 0) and Color3.fromRGB(255, 255, 180) or Color3.fromRGB(60, 60, 30)
+    end,
+
+    -- Pattern 74: Tartan / Plaid Overlay
+    function(gx, gz, width, length)
+        local vertBand = (gx % 4 == 0) or (gx % 4 == 1)
+        local horizBand = (gz % 4 == 0) or (gz % 4 == 1)
+        if vertBand and horizBand then
+            return Color3.fromRGB(255, 220, 0)
+        elseif vertBand then
+            return Color3.fromRGB(200, 30, 30)
+        elseif horizBand then
+            return Color3.fromRGB(30, 120, 200)
+        else
+            return Color3.fromRGB(20, 60, 30)
+        end
+    end,
+
+    -- Pattern 75: Pinwheel Quadrants
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local relX = gx - cx
+        local relZ = gz - cz
+        local quad = 1
+        if relX >= 0 and relZ < 0 then quad = 1 end
+        if relX > 0 and relZ >= 0 then quad = 2 end
+        if relX <= 0 and relZ > 0 then quad = 3 end
+        if relX < 0 and relZ <= 0 then quad = 4 end
+        
+        local stripe = (quad % 2 == 0) and ((gx + gz) % 2 == 0) or ((gx - gz) % 2 == 0)
+        return stripe and Color3.fromRGB(255, 100, 0) or Color3.fromRGB(40, 10, 60)
+    end,
+
+    -- Pattern 76: Vertical Pulse Bars
+    function(gx, gz, width, length)
+        local barWidth = 2
+        local activeBar = math.floor(gx / barWidth) % 2 == 0
+        if activeBar then
+            local intensity = 1 - (gz / (length - 1))
+            return Color3.fromRGB(0, math.floor(intensity * 255), math.floor(intensity * 200))
+        else
+            return Color3.fromRGB(15, 15, 25)
+        end
+    end,
+
+    -- Pattern 77: Center-Out Circular Gradient Steps
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local maxR = math.sqrt(cx^2 + cz^2)
+        local r = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local normalized = math.clamp(r / maxR, 0, 1)
+        local hue = 0.66 - (normalized * 0.66) -- Blue to Red
+        return Color3.fromHSV(hue, 0.85, 0.9)
+    end,
+
+    -- Pattern 78: Offset Corner Radii
+    function(gx, gz, width, length)
+        local distTL = math.sqrt(gx^2 + gz^2)
+        local distTR = math.sqrt(((width - 1) - gx)^2 + gz^2)
+        local check = math.floor(distTL) + math.floor(distTR)
+        return (check % 2 == 0) and Color3.fromRGB(240, 180, 220) or Color3.fromRGB(80, 40, 90)
+    end,
+
+    -- Pattern 79: Hypnotic Maze Steps
+    function(gx, gz, width, length)
+        local layer = math.min(gx, gz, (width - 1) - gx, (length - 1) - gz)
+        local isGate = (gx == layer + 1 and gz == layer) or (gz == (length - 1) - layer and gx == (width - 1) - layer - 1)
+        if isGate then
+            return Color3.fromRGB(0, 0, 0)
+        else
+            return (layer % 2 == 0) and Color3.fromRGB(0, 255, 120) or Color3.fromRGB(10, 30, 20)
+        end
+    end,
+
+    -- Pattern 80: Triangular Mesh Tri-Color
+    function(gx, gz, width, length)
+        local val = (gx * 2 + gz * 3) % 3
+        if val == 0 then
+            return Color3.fromRGB(255, 80, 120)
+        elseif val == 1 then
+            return Color3.fromRGB(120, 255, 80)
+        else
+            return Color3.fromRGB(80, 120, 255)
+        end
+    end,
+
+    -- Pattern 81: Expanding Diamond Rings
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.abs(gx - cx) + math.abs(gz - cz)
+        local ring = math.floor(dist * 0.8) % 3
+        if ring == 0 then
+            return Color3.fromRGB(255, 50, 50)
+        elseif ring == 1 then
+            return Color3.fromRGB(255, 255, 255)
+        else
+            return Color3.fromRGB(50, 50, 255)
+        end
+    end,
+
+    -- Pattern 82: Diagonal Cross Bands
+    function(gx, gz, width, length)
+        local band1 = (gx + gz) % 5 < 2
+        local band2 = (gx - gz) % 5 < 2
+        if band1 and band2 then
+            return Color3.fromRGB(255, 255, 0)
+        elseif band1 or band2 then
+            return Color3.fromRGB(180, 50, 200)
+        else
+            return Color3.fromRGB(20, 10, 30)
+        end
+    end,
+
+    -- Pattern 83: Corner-Focused Radar Sweep
+    function(gx, gz, width, length)
+        local angle = math.atan2(gz, gx)
+        local sweep = math.floor((angle / (math.pi / 2)) * 6)
+        local active = sweep % 2 == 0
+        return active and Color3.fromRGB(50, 255, 100) or Color3.fromRGB(10, 40, 20)
+    end,
+
+    -- Pattern 84: Stepped Pyramid Elevation
+    function(gx, gz, width, length)
+        local depth = math.min(gx, gz, (width - 1) - gx, (length - 1) - gz)
+        local val = math.clamp(depth / (math.min(width, length) / 2), 0, 1)
+        return Color3.fromRGB(math.floor(val * 255), math.floor(val * 220), math.floor(val * 150))
+    end,
+
+    -- Pattern 85: Nested Squares Outline
+    function(gx, gz, width, length)
+        local depth = math.min(gx, gz, (width - 1) - gx, (length - 1) - gz)
+        local isOutline = (gx == depth or gz == depth or gx == (width - 1) - depth or gz == (length - 1) - depth)
+        return (depth % 2 == 0 and isOutline) and Color3.fromRGB(0, 220, 255) or Color3.fromRGB(15, 25, 40)
+    end,
+
+    -- Pattern 86: Sine-Cosine Dot Grid
+    function(gx, gz, width, length)
+        local valX = math.sin(gx * 1.2)
+        local valZ = math.cos(gz * 1.2)
+        if valX > 0.3 and valZ > 0.3 then
+            return Color3.fromRGB(255, 100, 200)
+        else
+            return Color3.fromRGB(30, 10, 30)
+        end
+    end,
+
+    -- Pattern 87: Isometric Cube Illusion
+    function(gx, gz, width, length)
+        local tri = (gx + gz * 2) % 6
+        if tri < 2 then
+            return Color3.fromRGB(220, 220, 230)
+        elseif tri < 4 then
+            return Color3.fromRGB(140, 140, 160)
+        else
+            return Color3.fromRGB(70, 70, 90)
+        end
+    end,
+
+    -- Pattern 88: Radial Sector Burst
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local sector = math.floor(((angle + math.pi) / (2 * math.pi)) * 12)
+        return (sector % 2 == 0) and Color3.fromRGB(255, 140, 0) or Color3.fromRGB(40, 15, 0)
+    end,
+
+    -- Pattern 89: Multi-Band Ripple Wave
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local wave = math.sin(dist * 0.9)
+        if wave > 0.5 then
+            return Color3.fromRGB(255, 255, 255)
+        elseif wave > -0.5 then
+            return Color3.fromRGB(100, 180, 255)
+        else
+            return Color3.fromRGB(10, 30, 80)
+        end
+    end,
+
+    -- Pattern 90: Center Target Cross
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local isCross = (math.abs(gx - cx) < 1) or (math.abs(gz - cz) < 1)
+        local dist = math.floor(math.sqrt((gx - cx)^2 + (gz - cz)^2))
+        if isCross then
+            return Color3.fromRGB(255, 30, 30)
+        else
+            return (dist % 2 == 0) and Color3.fromRGB(230, 230, 230) or Color3.fromRGB(50, 50, 50)
+        end
+    end,
+
+	-- Pattern 91: Pulsing Concentric Waves
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local phase = math.sin(dist * 0.8 - tick() * 3)
+        local val = math.floor((phase + 1) * 127.5)
+        return Color3.fromRGB(val, 50, 255 - val)
+    end,
+
+    -- Pattern 92: Rainbow Plasma Field
+    function(gx, gz, width, length)
+        local t = tick() * 2
+        local v1 = math.sin(gx * 0.5 + t)
+        local v2 = math.sin(gz * 0.5 + t)
+        local v3 = math.sin((gx + gz) * 0.3 + t)
+        local hue = ((v1 + v2 + v3 + 3) / 6) % 1
+        return Color3.fromHSV(hue, 0.9, 1)
+    end,
+
+    -- Pattern 93: Sweeping Radar Beam
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local sweepAngle = (tick() * 3) % (math.pi * 2) - math.pi
+        local diff = math.abs(angle - sweepAngle)
+        if diff > math.pi then diff = (math.pi * 2) - diff end
+        local intensity = math.clamp(1 - (diff * 2), 0, 1)
+        return Color3.fromRGB(0, math.floor(intensity * 255), math.floor(intensity * 100))
+    end,
+
+    -- Pattern 94: Scrolling Matrix Rain
+    function(gx, gz, width, length)
+        local speed = (gx * 3) % 5 + 3
+        local head = math.floor(tick() * speed + gx * 7) % length
+        local dist = (gz - head) % length
+        if dist == 0 then
+            return Color3.fromRGB(200, 255, 200)
+        elseif dist < 4 then
+            local fade = (1 - (dist / 4))
+            return Color3.fromRGB(0, math.floor(fade * 255), 0)
+        else
+            return Color3.fromRGB(5, 15, 5)
+        end
+    end,
+
+    -- Pattern 95: Rotating Starburst
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx) + tick() * 1.5
+        local ray = math.floor((angle / (math.pi * 2)) * 12) % 2
+        return (ray == 0) and Color3.fromRGB(255, 200, 0) or Color3.fromRGB(20, 10, 40)
+    end,
+
+    -- Pattern 96: Breathing Neon Grid
+    function(gx, gz, width, length)
+        local pulse = (math.sin(tick() * 2.5) + 1) * 0.5
+        local isGrid = (gx % 2 == 0) or (gz % 2 == 0)
+        if isGrid then
+            return Color3.fromRGB(0, math.floor(pulse * 255), 255)
+        else
+            return Color3.fromRGB(math.floor((1 - pulse) * 100), 0, 80)
+        end
+    end,
+
+    -- Pattern 97: Horizontal Color Waterfall
+    function(gx, gz, width, length)
+        local offset = tick() * 4
+        local hue = ((gz + offset) * 0.05) % 1
+        return Color3.fromHSV(hue, 0.8, 0.9)
+    end,
+
+    -- Pattern 98: Expanding Circular Shockwave
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local radius = (tick() * 6) % (math.max(width, length) * 0.8)
+        local bandWidth = 1.5
+        if math.abs(dist - radius) < bandWidth then
+            return Color3.fromRGB(255, 100, 0)
+        else
+            return Color3.fromRGB(20, 20, 30)
+        end
+    end,
+
+    -- Pattern 99: Dynamic Equalizer Bars
+    function(gx, gz, width, length)
+        local height = math.floor((math.sin(gx * 0.7 + tick() * 5) * 0.5 + 0.5) * length)
+        local currentZ = (length - 1) - gz
+        if currentZ < height then
+            local intensity = currentZ / length
+            return Color3.fromRGB(math.floor(intensity * 255), math.floor((1 - intensity) * 255), 50)
+        else
+            return Color3.fromRGB(10, 10, 20)
+        end
+    end,
+
+    -- Pattern 100: Orbiting Energy Orbs
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 2
+        local ox1, oz1 = cx + math.cos(t) * 3, cz + math.sin(t) * 3
+        local ox2, oz2 = cx + math.cos(t + math.pi) * 3, cz + math.sin(t + math.pi) * 3
+        local d1 = math.sqrt((gx - ox1)^2 + (gz - oz1)^2)
+        local d2 = math.sqrt((gx - ox2)^2 + (gz - oz2)^2)
+        if d1 < 1.5 then
+            return Color3.fromRGB(0, 255, 255)
+        elseif d2 < 1.5 then
+            return Color3.fromRGB(255, 0, 150)
+        else
+            return Color3.fromRGB(10, 10, 25)
+        end
+    end,
+
+    -- Pattern 101: Hypnotic Spiral Tunnel
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        local val = math.sin(dist * 1.5 - angle * 3 - tick() * 4)
+        return (val > 0) and Color3.fromRGB(150, 0, 255) or Color3.fromRGB(10, 0, 30)
+    end,
+
+    -- Pattern 102: Sirens Strobing Flash
+    function(gx, gz, width, length)
+        local cycle = math.floor(tick() * 8) % 2
+        local isLeft = gx < (width / 2)
+        if cycle == 0 then
+            return isLeft and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(10, 10, 20)
+        else
+            return (not isLeft) and Color3.fromRGB(0, 100, 255) or Color3.fromRGB(10, 10, 20)
+        end
+    end,
+
+    -- Pattern 103: Dynamic Snake Path
+    function(gx, gz, width, length)
+        local headPos = math.floor(tick() * 10) % (width * length)
+        local currentPos = gz * width + gx
+        local diff = (headPos - currentPos) % (width * length)
+        if diff == 0 then
+            return Color3.fromRGB(255, 255, 255)
+        elseif diff < 6 then
+            return Color3.fromRGB(0, 255, 100)
+        else
+            return Color3.fromRGB(15, 25, 15)
+        end
+    end,
+
+    -- Pattern 104: Traveling Diamond Pulse
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local manhattan = math.abs(gx - cx) + math.abs(gz - cz)
+        local pulse = (tick() * 5) % (width + length)
+        if math.abs(manhattan - pulse) < 1 then
+            return Color3.fromRGB(255, 220, 0)
+        else
+            return Color3.fromRGB(30, 15, 0)
+        end
+    end,
+
+    -- Pattern 105: Pulsing Checkerboard
+    function(gx, gz, width, length)
+        local check = (gx + gz) % 2 == 0
+        local phase = math.sin(tick() * 4) > 0
+        if check == phase then
+            return Color3.fromRGB(255, 255, 255)
+        else
+            return Color3.fromRGB(0, 0, 0)
+        end
+    end,
+
+    -- Pattern 106: Vertical Color Waves
+    function(gx, gz, width, length)
+        local wave = math.sin(gx * 0.8 + tick() * 3)
+        local hue = (wave * 0.5 + 0.5)
+        return Color3.fromHSV(hue, 0.9, 0.9)
+    end,
+
+    -- Pattern 107: Oscillating Crosshairs
+    function(gx, gz, width, length)
+        local cx = math.floor((math.sin(tick() * 2) * 0.5 + 0.5) * (width - 1))
+        local cz = math.floor((math.cos(tick() * 2) * 0.5 + 0.5) * (length - 1))
+        if gx == cx or gz == cz then
+            return Color3.fromRGB(255, 0, 50)
+        else
+            return Color3.fromRGB(20, 20, 20)
+        end
+    end,
+
+    -- Pattern 108: Rainbow Ring Emitter
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local hue = (dist * 0.1 - tick() * 0.5) % 1
+        return Color3.fromHSV(hue, 1, 1)
+    end,
+
+    -- Pattern 109: Shifting Zebra Stripes
+    function(gx, gz, width, length)
+        local stripe = (gx + gz + math.floor(tick() * 6)) % 4 < 2
+        return stripe and Color3.fromRGB(240, 240, 240) or Color3.fromRGB(15, 15, 15)
+    end,
+
+    -- Pattern 110: Lava Lamp Blobs
+    function(gx, gz, width, length)
+        local t = tick()
+        local b1 = math.sin(gx * 0.4 + t) + math.cos(gz * 0.4 + t)
+        local b2 = math.cos(gx * 0.3 - t) + math.sin(gz * 0.3 + t)
+        if (b1 + b2) > 0.8 then
+            return Color3.fromRGB(255, 80, 0)
+        else
+            return Color3.fromRGB(60, 0, 100)
+        end
+    end,
+
+    -- Pattern 111: Rotating Windmill
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx) + tick() * 2
+        local sector = math.floor((angle / (math.pi / 2))) % 2
+        return (sector == 0) and Color3.fromRGB(0, 200, 255) or Color3.fromRGB(20, 20, 40)
+    end,
+
+    -- Pattern 112: Twinkling Starfield
+    function(gx, gz, width, length)
+        local seed = (gx * 12.9898 + gz * 78.233)
+        local noise = (math.sin(seed + tick() * 2) * 43758.5453) % 1
+        if noise > 0.85 then
+            return Color3.fromRGB(255, 255, 200)
+        else
+            return Color3.fromRGB(5, 5, 15)
+        end
+    end,
+
+    -- Pattern 113: Shifting Diagonal Bars
+    function(gx, gz, width, length)
+        local pos = (gx - gz + math.floor(tick() * 8)) % 6
+        if pos < 2 then
+            return Color3.fromRGB(255, 0, 100)
+        elseif pos < 4 then
+            return Color3.fromRGB(0, 255, 200)
+        else
+            return Color3.fromRGB(20, 20, 30)
+        end
+    end,
+
+    -- Pattern 114: Concentric Breathing Squares
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local layer = math.max(math.abs(gx - cx), math.abs(gz - cz))
+        local val = math.sin(layer * 0.8 - tick() * 3)
+        return (val > 0) and Color3.fromRGB(255, 180, 0) or Color3.fromRGB(40, 10, 50)
+    end,
+
+    -- Pattern 115: Sweeping Vertical Scanline
+    function(gx, gz, width, length)
+        local lineX = math.floor((math.sin(tick() * 3) * 0.5 + 0.5) * width)
+        local dist = math.abs(gx - lineX)
+        if dist < 1.5 then
+            return Color3.fromRGB(0, 255, 255)
+        else
+            return Color3.fromRGB(10, 20, 30)
+        end
+    end,
+
+    -- Pattern 116: Breathing Hexagonal Wave
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dx = math.abs(gx - cx)
+        local dz = math.abs(gz - cz)
+        local hexDist = math.max(dx, dz + dx * 0.5)
+        local phase = math.sin(hexDist * 0.7 - tick() * 4)
+        return (phase > 0) and Color3.fromRGB(50, 255, 150) or Color3.fromRGB(10, 30, 20)
+    end,
+
+    -- Pattern 117: Rainbow Spiral Galaxy
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        local hue = (angle / (math.pi * 2) + dist * 0.1 - tick() * 0.3) % 1
+        return Color3.fromHSV(hue, 0.9, 1)
+    end,
+
+    -- Pattern 118: Pulsing Corner Beams
+    function(gx, gz, width, length)
+        local d1 = math.sqrt(gx^2 + gz^2)
+        local d2 = math.sqrt(((width - 1) - gx)^2 + ((length - 1) - gz)^2)
+        local val = math.sin(d1 * 0.5 - tick() * 3) + math.sin(d2 * 0.5 - tick() * 3)
+        return (val > 0) and Color3.fromRGB(255, 50, 150) or Color3.fromRGB(20, 10, 30)
+    end,
+
+    -- Pattern 119: Alternating Chevron Motion
+    function(gx, gz, width, length)
+        local offset = math.abs((gx % 4) - 2)
+        local active = ((gz + offset + math.floor(tick() * 6)) % 4 < 2)
+        return active and Color3.fromRGB(255, 140, 0) or Color3.fromRGB(30, 30, 10)
+    end,
+
+    -- Pattern 120: Expanding Pulsing Heart
+    function(gx, gz, width, length)
+        local scale = 1.1 + math.sin(tick() * 4) * 0.2
+        local x = (gx - (width - 1) / 2) / (width / 2) * scale
+        local z = ((length - 1) - gz - (length / 2)) / (length / 2) * scale
+        local eq = (x^2 + z^2 - 1)^3 - (x^2) * (z^3)
+        if eq <= 0 then
+            return Color3.fromRGB(255, 20, 60)
+        else
+            return Color3.fromRGB(15, 5, 15)
+        end
+    end,
+
+	-- Pattern 121: Digital DNA Double Helix
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local speed = tick() * 3
+        local strand1 = cx + math.sin(gz * 0.5 + speed) * (width * 0.35)
+        local strand2 = cx + math.sin(gz * 0.5 + speed + math.pi) * (width * 0.35)
+        
+        local d1 = math.abs(gx - strand1)
+        local d2 = math.abs(gx - strand2)
+        
+        -- Base pair rungs connecting strands
+        local isRung = (math.floor(gz + speed * 2) % 3 == 0) and (gx > math.min(strand1, strand2) and gx < math.max(strand1, strand2))
+        
+        if d1 < 0.8 then
+            return Color3.fromRGB(0, 230, 255)
+        elseif d2 < 0.8 then
+            return Color3.fromRGB(255, 0, 120)
+        elseif isRung then
+            return Color3.fromRGB(180, 180, 220)
+        else
+            return Color3.fromRGB(5, 10, 20)
+        end
+    end,
+
+    -- Pattern 122: Quantum Superposition (Flickering Probability Wave)
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local prob = math.exp(-dist * 0.4) * (math.sin(dist * 2 - tick() * 8) * 0.5 + 0.5)
+        local noise = (math.sin(gx * 91.1 + gz * 43.7 + tick() * 15) * 43758.5453) % 1
+        
+        if noise < prob then
+            return Color3.fromRGB(180, 100, 255)
+        else
+            return Color3.fromRGB(math.floor(prob * 40), 0, math.floor(prob * 80))
+        end
+    end,
+
+    -- Pattern 123: Biome Sentinel Eye (Tracking Iris)
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 1.5
+        -- Target moves in smooth figure-8
+        local tx = cx + math.sin(t) * (width * 0.25)
+        local tz = cz + math.sin(t * 2) * (length * 0.25)
+        
+        local distToEye = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local distToPupil = math.sqrt((gx - tx)^2 + (gz - tz)^2)
+        
+        if distToPupil < 0.9 then
+            return Color3.fromRGB(0, 0, 0) -- Pupil
+        elseif distToPupil < 2.2 then
+            return Color3.fromRGB(0, 255, 150) -- Iris
+        elseif distToEye < 4.5 then
+            return Color3.fromRGB(220, 220, 240) -- Sclera
+        else
+            return Color3.fromRGB(15, 15, 25)
+        end
+    end,
+
+    -- Pattern 124: Hyperspace Jump (Star Warp)
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        
+        local streak = (math.sin(angle * 8 + tick() * 12) * 0.5 + 0.5)
+        local speed = (tick() * 10 + dist * 2) % 5
+        
+        if streak > 0.7 and speed < 2.5 then
+            local intensity = math.clamp(dist / (width * 0.5), 0.2, 1)
+            return Color3.fromRGB(math.floor(200 * intensity), math.floor(230 * intensity), 255)
+        else
+            return Color3.fromRGB(2, 4, 12)
+        end
+    end,
+
+    -- Pattern 125: Glitch Cyber Grid
+    function(gx, gz, width, length)
+        local t = tick()
+        local glitchLine = math.floor((t * 7) % length)
+        local isGrid = (gx % 2 == 0) or (gz % 2 == 0)
+        
+        if gz == glitchLine then
+            -- Horizontal glitch tear
+            local shiftX = math.floor(gx + math.sin(t * 20) * 3) % width
+            return Color3.fromRGB(255, (shiftX % 2 == 0) and 255 or 0, 100)
+        elseif isGrid then
+            return Color3.fromRGB(0, 120, 180)
+        else
+            return Color3.fromRGB(10, 10, 15)
+        end
+    end,
+
+    -- Pattern 126: Thermal Infra-Cam Simulation
+    function(gx, gz, width, length)
+        local t = tick() * 1.2
+        -- Heat source 1 & 2 moving around
+        local h1x, h1z = (math.sin(t) * 0.3 + 0.5) * width, (math.cos(t * 0.8) * 0.3 + 0.5) * length
+        local h2x, h2z = (math.cos(t * 1.3) * 0.3 + 0.5) * width, (math.sin(t * 1.1) * 0.3 + 0.5) * length
+        
+        local temp1 = 1 / (1 + ((gx - h1x)^2 + (gz - h1z)^2) * 0.3)
+        local temp2 = 1 / (1 + ((gx - h2x)^2 + (gz - h2z)^2) * 0.3)
+        local heat = math.clamp(temp1 + temp2, 0, 1)
+        
+        -- False color mapping (Black -> Blue -> Magenta -> Yellow -> White)
+        if heat < 0.25 then
+            return Color3.fromRGB(0, 0, math.floor(heat * 4 * 255))
+        elseif heat < 0.5 then
+            return Color3.fromRGB(math.floor((heat - 0.25) * 4 * 255), 0, 255)
+        elseif heat < 0.75 then
+            return Color3.fromRGB(255, math.floor((heat - 0.5) * 4 * 255), 0)
+        else
+            return Color3.fromRGB(255, 255, math.floor((heat - 0.75) * 4 * 255))
+        end
+    end,
+
+    -- Pattern 127: Chrono Clock Dial
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        
+        local secAngle = ((tick() * 2) % (math.pi * 2)) - math.pi
+        local minAngle = ((tick() * 0.3) % (math.pi * 2)) - math.pi
+        
+        local secDiff = math.abs(angle - secAngle)
+        local minDiff = math.abs(angle - minAngle)
+        
+        if dist < 0.8 then return Color3.fromRGB(255, 255, 255) end -- Pivot
+        if dist < (width * 0.45) then
+            if secDiff < 0.15 then return Color3.fromRGB(255, 30, 30) end -- Second Hand
+            if minDiff < 0.25 and dist < (width * 0.3) then return Color3.fromRGB(200, 200, 255) end -- Hour/Min Hand
+        end
+        return Color3.fromRGB(20, 25, 35)
+    end,
+
+    -- Pattern 128: Cybernetic Neural Synapse Flash
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 3
+        local dist = math.abs(gx - cx) + math.abs(gz - cz)
+        local fire = math.sin(dist * 1.2 - t)
+        
+        if fire > 0.85 then
+            return Color3.fromRGB(255, 255, 200) -- Electrical spike
+        elseif fire > 0.4 then
+            return Color3.fromRGB(0, 180, 255) -- Axon signal
+        else
+            return Color3.fromRGB(10, 20, 40)
+        end
+    end,
+
+    -- Pattern 129: Gravitational Black Hole Accretion
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        
+        local spiral = (angle + dist * 1.8 - tick() * 4) % (math.pi * 2)
+        
+        if dist < 1.5 then
+            return Color3.fromRGB(0, 0, 0) -- Event Horizon
+        elseif dist < 4.5 then
+            local intensity = (math.sin(spiral) + 1) * 0.5
+            return Color3.fromRGB(255, math.floor(intensity * 180 + 50), 20)
+        else
+            return Color3.fromRGB(10, 5, 15)
+        end
+    end,
+
+    -- Pattern 130: Retro synthwave Horizon Grid
+    function(gx, gz, width, length)
+        local speed = tick() * 4
+        local perspectiveZ = math.pow(gz / length, 1.5) * length
+        local gridZ = (perspectiveZ + speed) % 2 < 0.3
+        local gridX = (gx % 2 == 0)
+        
+        if gridZ or (gridX and gz > length * 0.3) then
+            local fade = gz / length
+            return Color3.fromRGB(math.floor(255 * fade), 0, math.floor(200 * fade))
+        else
+            return Color3.fromRGB(10, 0, 25)
+        end
+    end,
+
+    -- Pattern 131: Solar Flare Prominence
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local noise = math.sin(gx * 2 + tick() * 3) * math.cos(gz * 2 + tick() * 2)
+        
+        local surface = 2.5 + noise * 0.8
+        if dist < surface then
+            return Color3.fromRGB(255, 240, 150) -- Core
+        elseif dist < surface + 1.8 then
+            return Color3.fromRGB(255, 100, 0) -- Flare
+        else
+            return Color3.fromRGB(30, 5, 0)
+        end
+    end,
+
+    -- Pattern 132: Digital Rain Storm (Diagonal Code)
+    function(gx, gz, width, length)
+        local diag = (gx + gz)
+        local drop = (diag * 3 + math.floor(tick() * 12)) % 16
+        if drop == 0 then
+            return Color3.fromRGB(240, 255, 240)
+        elseif drop < 4 then
+            return Color3.fromRGB(0, 255 - (drop * 50), 120)
+        else
+            return Color3.fromRGB(0, 15, 10)
+        end
+    end,
+
+    -- Pattern 133: Bioluminescent Jellyfish Pulse
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local cycle = (tick() * 2) % (math.pi * 2)
+        local bellY = (math.sin(cycle) * 0.2 + 0.4) * length
+        
+        local distHead = math.sqrt((gx - cx)^2 + (gz - bellY)^2)
+        
+        if distHead < 2.0 then
+            local glow = math.sin(cycle * 2) * 0.3 + 0.7
+            return Color3.fromRGB(math.floor(100 * glow), 255, math.floor(230 * glow))
+        elseif gz > bellY and math.abs(gx - cx) < 2.5 then
+            -- Tentacles
+            local wave = math.sin(gz * 1.2 - tick() * 5)
+            if wave > 0.3 then
+                return Color3.fromRGB(0, 150, 220)
+            end
+        end
+        return Color3.fromRGB(5, 10, 30)
+    end,
+
+    -- Pattern 134: Kinetic Pendulum Wave
+    function(gx, gz, width, length)
+        local freq = 1 + (gx * 0.2)
+        local targetZ = ((math.sin(tick() * freq) * 0.4) + 0.5) * (length - 1)
+        local dist = math.abs(gz - targetZ)
+        
+        if dist < 0.8 then
+            return Color3.fromRGB(255, 215, 0)
+        else
+            return Color3.fromRGB(15, 15, 20)
+        end
+    end,
+
+    -- Pattern 135: Electromagnetic Shield Impact
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        
+        -- Hex Shield Grid
+        local hex = (math.sin(gx * 1.5) + math.cos(gz * 1.5)) > 0
+        local impact = (tick() * 6) % 10
+        local ripple = math.abs(dist - impact)
+        
+        if ripple < 1.2 then
+            return Color3.fromRGB(100, 220, 255) -- Impact Wave
+        elseif hex then
+            return Color3.fromRGB(10, 40, 80) -- Standby Shield
+        else
+            return Color3.fromRGB(5, 10, 20)
+        end
+    end,
+
+    -- Pattern 136: Digital Hourglass Flow
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local t = (tick() * 3) % length
+        
+        -- Constriction at center
+        local neckWidth = math.abs(gz - (length / 2)) * 0.6 + 0.5
+        local insideBoundary = math.abs(gx - cx) <= neckWidth
+        
+        if insideBoundary then
+            local particle = (gx + math.floor(gz * 3 + tick() * 10)) % 3 == 0
+            if particle then
+                return Color3.fromRGB(255, 190, 40)
+            else
+                return Color3.fromRGB(40, 30, 10)
+            end
+        else
+            return Color3.fromRGB(80, 80, 100) -- Glass outline
+        end
+    end,
+
+    -- Pattern 137: Audio Spectrogram Waterfall
+    function(gx, gz, width, length)
+        local speed = tick() * 5
+        local freqData = math.sin(gx * 0.8 + (gz + speed) * 0.3) * math.cos(gx * 0.3)
+        local val = math.clamp((freqData + 1) * 0.5, 0, 1)
+        
+        return Color3.fromHSV((1 - val) * 0.7, 0.9, val)
+    end,
+
+    -- Pattern 138: Cybernetic Lotus Blooming
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        
+        local petals = math.sin(angle * 6 + tick() * 2) * 1.5 + 2.5
+        if dist < petals then
+            return Color3.fromRGB(255, 100, 200)
+        elseif dist < petals + 0.8 then
+            return Color3.fromRGB(255, 255, 255)
+        else
+            return Color3.fromRGB(10, 20, 15)
+        end
+    end,
+
+    -- Pattern 139: Radar Target Lock-On
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 4
+        
+        local isCrosshair = (math.abs(gx - cx) < 0.5) or (math.abs(gz - cz) < 0.5)
+        local lockRing = math.abs(math.sqrt((gx - cx)^2 + (gz - cz)^2) - (2 + math.sin(t) * 0.5)) < 0.5
+        
+        if isCrosshair and lockRing then
+            return Color3.fromRGB(255, 0, 0) -- Lock intersection
+        elseif lockRing then
+            return Color3.fromRGB(255, 50, 0)
+        elseif isCrosshair then
+            return Color3.fromRGB(0, 150, 0)
+        else
+            return Color3.fromRGB(5, 20, 5)
+        end
+    end,
+
+    -- Pattern 140: Cosmic Aurora Borealis
+    function(gx, gz, width, length)
+        local t = tick() * 1.5
+        local wave1 = math.sin(gx * 0.4 + gz * 0.2 + t)
+        local wave2 = math.cos(gx * 0.2 - gz * 0.5 + t * 0.8)
+        local combined = (wave1 + wave2 + 2) / 4
+        
+        local r = math.floor(combined * 50)
+        local g = math.floor(combined * 255)
+        local b = math.floor((1 - combined) * 200 + 55)
+        return Color3.fromRGB(r, g, b)
+    end,
+
+    -- Pattern 141: Radioactive Isotope Decay
+    function(gx, gz, width, length)
+        local pulse = math.sin(tick() * 10) * 0.5 + 0.5
+        local isCenter = (math.abs(gx - (width - 1) / 2) < 1.5) and (math.abs(gz - (length - 1) / 2) < 1.5)
+        
+        if isCenter then
+            return Color3.fromRGB(255, 255, 0)
+        else
+            local rand = (math.sin(gx * 12.3 + gz * 45.6 + tick() * 20) * 43758.5) % 1
+            if rand > 0.92 then
+                return Color3.fromRGB(50, 255, 50) -- Radiation particle
+            else
+                return Color3.fromRGB(15, 20, 10)
+            end
+        end
+    end,
+
+    -- Pattern 142: Vortex Wormhole Passage
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        
+        local ring = math.floor(dist - tick() * 6) % 3 == 0
+        local spoke = math.floor((angle / math.pi) * 4) % 2 == 0
+        
+        if ring and spoke then
+            return Color3.fromRGB(0, 255, 220)
+        elseif ring then
+            return Color3.fromRGB(100, 0, 255)
+        else
+            return Color3.fromRGB(10, 5, 20)
+        end
+    end,
+
+    -- Pattern 143: Supernova Explosion Expansion
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local progress = (tick() * 4) % (width * 0.8)
+        
+        local shockwave = math.abs(dist - progress)
+        
+        if shockwave < 0.8 then
+            return Color3.fromRGB(255, 255, 255) -- Front edge
+        elseif dist < progress then
+            local dissipate = 1 - (dist / progress)
+            return Color3.fromRGB(255, math.floor(dissipate * 150), 0)
+        else
+            return Color3.fromRGB(5, 5, 10)
+        end
+    end,
+
+    -- Pattern 144: Particle Collider Ring
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        
+        local isTrack = math.abs(dist - (width * 0.38)) < 0.6
+        local p1 = (angle - tick() * 8) % (math.pi * 2) < 0.4
+        local p2 = (angle + tick() * 8) % (math.pi * 2) < 0.4
+        
+        if isTrack and (p1 or p2) then
+            return Color3.fromRGB(255, 255, 100) -- Accelerating particle
+        elseif isTrack then
+            return Color3.fromRGB(0, 100, 200) -- Collider ring
+        else
+            return Color3.fromRGB(10, 10, 15)
+        end
+    end,
+
+    -- Pattern 145: Cybernetic Fingerprint Scanner
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local scanLine = (tick() * 4) % length
+        
+        local ridge = math.sin(dist * 3) > 0
+        local isScanned = math.abs(gz - scanLine) < 0.8
+        
+        if isScanned then
+            return Color3.fromRGB(0, 255, 120) -- Laser beam
+        elseif ridge then
+            return Color3.fromRGB(0, 80, 160) -- Print ridges
+        else
+            return Color3.fromRGB(5, 15, 25)
+        end
+    end,
+
+    -- Pattern 146: Binary Matrix Stream Cascade
+    function(gx, gz, width, length)
+        local bit = (math.floor(gx + gz + tick() * 12)) % 2 == 0
+        local speed = (gx * 5) % 3 + 2
+        local activeColumn = math.sin(gz * 0.5 + tick() * speed) > 0.2
+        
+        if activeColumn then
+            return bit and Color3.fromRGB(0, 255, 80) or Color3.fromRGB(0, 100, 30)
+        else
+            return Color3.fromRGB(5, 15, 5)
+        end
+    end,
+
+    -- Pattern 147: Molten Gold Wave
+    function(gx, gz, width, length)
+        local wave = math.sin(gx * 0.5 + tick() * 2) + math.cos(gz * 0.5 + tick() * 1.5)
+        local val = (wave + 2) / 4
+        
+        return Color3.fromRGB(255, math.floor(val * 160 + 40), math.floor(val * 20))
+    end,
+
+    -- Pattern 148: Tectonic Rift Pulse
+    function(gx, gz, width, length)
+        local crack = math.abs(gx - ((width - 1) / 2 + math.sin(gz * 0.6) * 1.5))
+        local pulse = math.sin(tick() * 5 - gz * 0.4) > 0.3
+        
+        if crack < 0.8 then
+            return pulse and Color3.fromRGB(255, 60, 0) or Color3.fromRGB(150, 20, 0)
+        else
+            return Color3.fromRGB(20, 20, 20)
+        end
+    end,
+
+    -- Pattern 149: Hypnotic Optical Illusion Disks
+    function(gx, gz, width, length)
+        local quadX = gx < (width / 2) and 0 or 1
+        local quadZ = gz < (length / 2) and 0 or 1
+        local dir = (quadX == quadZ) and 1 or -1
+        
+        local subCx = quadX == 0 and (width / 4) or (width * 0.75)
+        local subCz = quadZ == 0 and (length / 4) or (length * 0.75)
+        
+        local dist = math.sqrt((gx - subCx)^2 + (gz - subCz)^2)
+        local ring = math.floor(dist * 2 + tick() * 5 * dir) % 2 == 0
+        
+        return ring and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(0, 0, 0)
+    end,
+
+    -- Pattern 150: Prism Light Refraction
+    function(gx, gz, width, length)
+        local ray = gx - (gz * 0.5) + math.sin(tick() * 2) * 2
+        local hue = ((ray * 0.1) + tick() * 0.1) % 1
+        local brightness = math.clamp(1 - math.abs(ray - (width * 0.25)) * 0.25, 0.1, 1)
+        
+        return Color3.fromHSV(hue, 0.8, brightness)
+    end,
+
+	-- Pattern 151: Quantum String Vibration
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local wave = math.sin(gz * 0.8 + tick() * 6) * math.cos(tick() * 3) * (width * 0.35)
+        local dist = math.abs(gx - (cx + wave))
+        if dist < 0.8 then
+            return Color3.fromRGB(0, 255, 230)
+        elseif dist < 1.8 then
+            return Color3.fromRGB(100, 0, 255)
+        else
+            return Color3.fromRGB(5, 5, 20)
+        end
+    end,
+
+    -- Pattern 152: Electric Plasma Ball Discharge
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local noise = math.sin(angle * 5 + tick() * 12) * math.cos(dist * 2 - tick() * 8)
+        if dist < 1.0 then
+            return Color3.fromRGB(255, 255, 255)
+        elseif math.abs(noise) > 0.6 and dist < (width * 0.45) then
+            return Color3.fromRGB(200, 50, 255)
+        else
+            return Color3.fromRGB(10, 0, 25)
+        end
+    end,
+
+    -- Pattern 153: Digital Pulse Code Modulation (PCM)
+    function(gx, gz, width, length)
+        local speed = tick() * 8
+        local bit = (math.floor(gx + speed) % 2 == 0) and (math.floor(gz + speed * 0.5) % 2 == 0)
+        local val = math.sin(gx * 0.4 + tick() * 2) * 0.5 + 0.5
+        if bit then
+            return Color3.fromRGB(255, math.floor(val * 200), 0)
+        else
+            return Color3.fromRGB(20, 20, 30)
+        end
+    end,
+
+    -- Pattern 154: Subatomic Particle Cloud
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 4
+        local orbits = math.sin(gx * 3 + t) + math.cos(gz * 3 - t)
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        if orbits > 1.2 and dist < (width * 0.45) then
+            return Color3.fromRGB(255, 220, 100)
+        else
+            return Color3.fromRGB(10, 15, 30)
+        end
+    end,
+
+    -- Pattern 155: Retro Vector Asteroid Field
+    function(gx, gz, width, length)
+        local t = tick() * 2
+        local ax, az = (math.sin(t) * 0.3 + 0.5) * width, (math.cos(t * 0.7) * 0.3 + 0.5) * length
+        local dist = math.sqrt((gx - ax)^2 + (gz - az)^2)
+        local isEdge = math.abs(dist - 2.5) < 0.6
+        if isEdge then
+            return Color3.fromRGB(0, 255, 120)
+        else
+            return Color3.fromRGB(2, 8, 5)
+        end
+    end,
+
+    -- Pattern 156: Cybernetic Heartbeat Monitor
+    function(gx, gz, width, length)
+        local sweep = (tick() * 6) % width
+        local distLine = math.abs(gx - sweep)
+        local beat = 0
+        if gx > (width * 0.3) and gx < (width * 0.7) then
+            beat = math.sin((gx - width * 0.3) * 20 + tick() * 10) * 2
+        end
+        local isPeak = math.abs(gz - ((length - 1) / 2 + beat)) < 0.8
+        if isPeak and distLine < 2 then
+            return Color3.fromRGB(255, 30, 60)
+        elseif isPeak then
+            return Color3.fromRGB(120, 10, 30)
+        else
+            return Color3.fromRGB(10, 5, 10)
+        end
+    end,
+
+    -- Pattern 157: Temporal Distortion Wave
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local distortion = math.sin(dist * 1.5 - tick() * 5) * math.cos(gx * 0.5)
+        local val = math.clamp((distortion + 1) * 0.5, 0, 1)
+        return Color3.fromRGB(math.floor(val * 180), 0, math.floor((1 - val) * 255))
+    end,
+
+    -- Pattern 158: Solar Wind Magnetosphere
+    function(gx, gz, width, length)
+        local shield = math.sin(gz * 0.5) * 2 + (width * 0.3)
+        local particle = (gx + math.floor(tick() * 12)) % width
+        if math.abs(gx - shield) < 0.8 then
+            return Color3.fromRGB(0, 180, 255)
+        elseif gx < shield and (gz + particle) % 3 == 0 then
+            return Color3.fromRGB(255, 200, 50)
+        else
+            return Color3.fromRGB(5, 10, 20)
+        end
+    end,
+
+    -- Pattern 159: Neural Network Synaptic Burst
+    function(gx, gz, width, length)
+        local nodeX = math.floor(gx / 2) * 2
+        local nodeZ = math.floor(gz / 2) * 2
+        local pulse = (math.sin(nodeX * 5 + nodeZ * 3 + tick() * 8) + 1) * 0.5
+        if pulse > 0.85 then
+            return Color3.fromRGB(255, 255, 255)
+        elseif pulse > 0.6 then
+            return Color3.fromRGB(0, 200, 255)
+        else
+            return Color3.fromRGB(10, 15, 30)
+        end
+    end,
+
+    -- Pattern 160: Cyber Polygon Wireframe Mesh
+    function(gx, gz, width, length)
+        local zOffset = math.floor(gz + tick() * 4) % 4
+        local xOffset = math.floor(gx + tick() * 2) % 4
+        local isNode = (xOffset == 0 and zOffset == 0)
+        local isWire = (xOffset == 0 or zOffset == 0)
+        if isNode then
+            return Color3.fromRGB(255, 0, 150)
+        elseif isWire then
+            return Color3.fromRGB(0, 100, 200)
+        else
+            return Color3.fromRGB(10, 10, 20)
+        end
+    end,
+
+    -- Pattern 161: Gravitational Wave Interferometer
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local wave1 = math.sin((gx - cx) * 1.2 + tick() * 5)
+        local wave2 = math.sin((gz - cz) * 1.2 + tick() * 5)
+        local interference = (wave1 + wave2) * 0.5
+        if math.abs(interference) > 0.8 then
+            return Color3.fromRGB(255, 230, 100)
+        else
+            return Color3.fromRGB(math.floor((interference + 1) * 30), 0, 60)
+        end
+    end,
+
+    -- Pattern 162: Deep Sea Hydrothermal Vent
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local plumeWidth = (length - gz) * 0.3 + 0.5
+        local plumeX = cx + math.sin(gz * 0.5 - tick() * 4) * 0.8
+        if math.abs(gx - plumeX) < plumeWidth then
+            local heat = (length - gz) / length
+            return Color3.fromRGB(255, math.floor(heat * 150), 0)
+        else
+            return Color3.fromRGB(5, 10, 25)
+        end
+    end,
+
+    -- Pattern 163: Digital Soundwave Spectrogram
+    function(gx, gz, width, length)
+        local freq = math.sin(gx * 1.5 + tick() * 6) * (length * 0.4) + (length / 2)
+        local dist = math.abs(gz - freq)
+        if dist < 0.8 then
+            return Color3.fromRGB(0, 255, 180)
+        elseif dist < 2.0 then
+            return Color3.fromRGB(0, 80, 150)
+        else
+            return Color3.fromRGB(5, 10, 20)
+        end
+    end,
+
+    -- Pattern 164: Cosmic String Turbulence
+    function(gx, gz, width, length)
+        local t = tick() * 2
+        local noise = math.sin(gx * 0.6 + gz * 0.4 + t) * math.cos(gx * 0.3 - gz * 0.7 + t)
+        if math.abs(noise) < 0.15 then
+            return Color3.fromRGB(255, 255, 255)
+        elseif math.abs(noise) < 0.4 then
+            return Color3.fromRGB(150, 0, 255)
+        else
+            return Color3.fromRGB(10, 5, 20)
+        end
+    end,
+
+    -- Pattern 165: Cyber Shield Hex Breakdown
+    function(gx, gz, width, length)
+        local hex = (gx * 3 + gz * 2 + math.floor(tick() * 5)) % 7
+        if hex == 0 then
+            return Color3.fromRGB(255, 50, 50)
+        elseif hex == 1 then
+            return Color3.fromRGB(0, 200, 255)
+        else
+            return Color3.fromRGB(10, 20, 40)
+        end
+    end,
+
+    -- Pattern 166: Kinetic Sand Chladni Patterns
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local x, z = (gx - cx), (gz - cz)
+        local n, m = 3, 2
+        local t = tick() * 1.5
+        local val = math.cos(n * x * 0.5 + t) * math.cos(m * z * 0.5 + t) - math.cos(m * x * 0.5 + t) * math.cos(n * z * 0.5 + t)
+        if math.abs(val) < 0.2 then
+            return Color3.fromRGB(240, 220, 180)
+        else
+            return Color3.fromRGB(20, 15, 10)
+        end
+    end,
+
+    -- Pattern 167: Holographic Data Disk Rotation
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        local track = math.floor(dist * 1.5)
+        local bit = (angle + track + tick() * 3) % (math.pi / 2) < 0.4
+        if dist > 1.2 and dist < (width * 0.48) and bit then
+            return Color3.fromRGB(0, 255, 200)
+        else
+            return Color3.fromRGB(10, 20, 30)
+        end
+    end,
+
+    -- Pattern 168: Particle Beam Accelerator
+    function(gx, gz, width, length)
+        local cz = (length - 1) / 2
+        local isCenter = math.abs(gz - cz) < 0.8
+        local pulse = (gx - tick() * 15) % width
+        if isCenter and pulse < 2 then
+            return Color3.fromRGB(255, 255, 200)
+        elseif isCenter then
+            return Color3.fromRGB(0, 150, 255)
+        else
+            return Color3.fromRGB(15, 10, 25)
+        end
+    end,
+
+    -- Pattern 169: Quantum Entanglement Link
+    function(gx, gz, width, length)
+        local t = tick() * 3
+        local p1x, p1z = 2, math.floor((math.sin(t) * 0.4 + 0.5) * length)
+        local p2x, p2z = width - 3, math.floor((math.cos(t) * 0.4 + 0.5) * length)
+        local isP1 = (gx == p1x and gz == p1z)
+        local isP2 = (gx == p2x and gz == p2z)
+        local isBeam = (gz == math.floor((p1z + p2z) / 2)) and (gx > p1x and gx < p2x)
+        if isP1 or isP2 then
+            return Color3.fromRGB(255, 0, 200)
+        elseif isBeam then
+            return Color3.fromRGB(0, 255, 255)
+        else
+            return Color3.fromRGB(5, 5, 15)
+        end
+    end,
+
+    -- Pattern 170: Bioluminescent Coral Growth
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local growth = (tick() * 1.5) % (width * 0.5)
+        local branch = math.sin(math.atan2(gz - cz, gx - cx) * 5) * 1.2
+        if math.abs(dist - (growth + branch)) < 0.8 then
+            return Color3.fromRGB(50, 255, 120)
+        else
+            return Color3.fromRGB(10, 25, 20)
+        end
+    end,
+
+    -- Pattern 171: Tachyon Speed Force Trails
+    function(gx, gz, width, length)
+        local streak = (gx * 2 + gz + math.floor(tick() * 16)) % 9
+        if streak == 0 then
+            return Color3.fromRGB(255, 230, 0)
+        elseif streak == 1 then
+            return Color3.fromRGB(255, 100, 0)
+        else
+            return Color3.fromRGB(20, 10, 5)
+        end
+    end,
+
+    -- Pattern 172: Dynamic Binary Clock Lattice
+    function(gx, gz, width, length)
+        local t = math.floor(tick())
+        local bitX = math.floor(2 ^ (gx % 4))
+        local bitZ = math.floor(2 ^ (gz % 4))
+        local active = bit32.band(t, bitX) ~= 0 and bit32.band(t, bitZ) ~= 0
+        if active then
+            return Color3.fromRGB(0, 255, 100)
+        else
+            return Color3.fromRGB(10, 20, 15)
+        end
+    end,
+
+    -- Pattern 173: Arc Reactor Core Energy
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local angle = math.atan2(gz - cz, gx - cx)
+        local segments = math.floor((angle / (math.pi * 2)) * 10) % 2 == 0
+        if dist < 1.0 then
+            return Color3.fromRGB(255, 255, 255)
+        elseif dist > 2.0 and dist < 3.5 and segments then
+            return Color3.fromRGB(0, 220, 255)
+        else
+            return Color3.fromRGB(5, 15, 25)
+        end
+    end,
+
+    -- Pattern 174: Cybernetic DNA Repair Grid
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local helix = cx + math.sin(gz * 0.6 + tick() * 3) * 2.5
+        local scanner = (tick() * 5) % length
+        if math.abs(gz - scanner) < 0.8 then
+            return Color3.fromRGB(255, 255, 0)
+        elseif math.abs(gx - helix) < 0.8 then
+            return Color3.fromRGB(0, 200, 255)
+        else
+            return Color3.fromRGB(10, 15, 25)
+        end
+    end,
+
+    -- Pattern 175: Hyperdimensional Tesseract Sweep
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 2
+        local scale = (math.sin(t) * 0.3 + 0.7)
+        local innerBox = math.abs(gx - cx) < (2 * scale) and math.abs(gz - cz) < (2 * scale)
+        local outerBox = math.abs(gx - cx) < (4 * scale) and math.abs(gz - cz) < (4 * scale)
+        if innerBox then
+            return Color3.fromRGB(255, 0, 100)
+        elseif outerBox then
+            return Color3.fromRGB(0, 150, 255)
+        else
+            return Color3.fromRGB(10, 10, 20)
+        end
+    end,
+
+    -- Pattern 176: Subliminal Optical Pulse
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local flash = math.floor(tick() * 10 + dist * 2) % 2 == 0
+        if flash then
+            return Color3.fromRGB(255, 255, 255)
+        else
+            return Color3.fromRGB(0, 0, 0)
+        end
+    end,
+
+    -- Pattern 177: Galactic Synchrotron Radiation
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx) + tick() * 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local spiral = (angle * 3 + dist * 1.2) % (math.pi * 2)
+        local hue = (spiral / (math.pi * 2))
+        return Color3.fromHSV(hue, 0.9, dist < (width * 0.48) and 1 or 0.1)
+    end,
+
+    -- Pattern 178: Cyberpunk Neon Raindrops
+    function(gx, gz, width, length)
+        local drop = (gx * 7 + math.floor(tick() * 10 + gz)) % 13 == 0
+        if drop then
+            return Color3.fromRGB(255, 0, 200)
+        else
+            return Color3.fromRGB(10, 5, 20)
+        end
+    end,
+
+    -- Pattern 179: Superconductor Magnetic Levitation
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 3
+        local track = math.sin(gx * 0.5 + t) * 2 + cz
+        if math.abs(gz - track) < 0.8 then
+            return Color3.fromRGB(0, 255, 255)
+        else
+            return Color3.fromRGB(15, 15, 25)
+        end
+    end,
+
+    -- Pattern 180: Digital Thermal Heatmap
+    function(gx, gz, width, length)
+        local t = tick() * 2
+        local val = math.sin(gx * 0.4 + t) * math.cos(gz * 0.4 - t)
+        local normalized = (val + 1) * 0.5
+        return Color3.fromHSV((1 - normalized) * 0.7, 1, 0.9)
+    end,
+
+	-- Pattern 181: Binary Rain Cascade
+    function(gx, gz, width, length)
+        local seed = (gx * 17 + math.floor(gz + tick() * 6)) % 7
+        if seed == 0 then
+            return Color3.fromRGB(0, 255, 100)
+        elseif seed == 1 then
+            return Color3.fromRGB(0, 120, 50)
+        else
+            return Color3.fromRGB(5, 15, 10)
+        end
+    end,
+
+    -- Pattern 182: Pulsing Crystal Core
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local manhattan = math.abs(gx - cx) + math.abs(gz - cz)
+        local pulse = (math.sin(tick() * 4) + 1) * 2.5
+        if manhattan <= pulse then
+            return Color3.fromRGB(180, 240, 255)
+        elseif manhattan <= pulse + 1.5 then
+            return Color3.fromRGB(80, 100, 200)
+        else
+            return Color3.fromRGB(10, 10, 25)
+        end
+    end,
+
+    -- Pattern 183: Orbiting Twin Pulsars
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 3
+        local p1x, p1z = cx + math.cos(t) * 3, cz + math.sin(t) * 3
+        local p2x, p2z = cx + math.cos(t + math.pi) * 3, cz + math.sin(t + math.pi) * 3
+        
+        local d1 = math.sqrt((gx - p1x)^2 + (gz - p1z)^2)
+        local d2 = math.sqrt((gx - p2x)^2 + (gz - p2z)^2)
+        
+        if d1 < 1.2 then
+            return Color3.fromRGB(255, 200, 50)
+        elseif d2 < 1.2 then
+            return Color3.fromRGB(50, 200, 255)
+        else
+            return Color3.fromRGB(10, 10, 20)
+        end
+    end,
+
+    -- Pattern 184: Rotating Radar Scanner
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local angle = math.atan2(gz - cz, gx - cx)
+        local sweep = (tick() * 3) % (math.pi * 2) - math.pi
+        local diff = (angle - sweep) % (math.pi * 2)
+        if diff < 0.8 then
+            local intensity = 1 - (diff / 0.8)
+            return Color3.fromRGB(0, math.floor(intensity * 255), math.floor(intensity * 80))
+        else
+            return Color3.fromRGB(0, 20, 0)
+        end
+    end,
+
+    -- Pattern 185: Electric Spark Lattice
+    function(gx, gz, width, length)
+        local noise = (math.sin(gx * 12.9898 + gz * 78.233 + tick() * 10) * 43758.5453) % 1
+        if noise > 0.82 then
+            return Color3.fromRGB(200, 240, 255)
+        elseif noise > 0.65 then
+            return Color3.fromRGB(0, 100, 255)
+        else
+            return Color3.fromRGB(10, 10, 30)
+        end
+    end,
+
+    -- Pattern 186: Shifting Diagonal Chevron
+    function(gx, gz, width, length)
+        local offset = math.floor(tick() * 5)
+        local chev = (gx + gz + offset) % 6
+        if chev == 0 or chev == 1 then
+            return Color3.fromRGB(255, 0, 120)
+        elseif chev == 2 then
+            return Color3.fromRGB(100, 0, 80)
+        else
+            return Color3.fromRGB(15, 5, 20)
+        end
+    end,
+
+    -- Pattern 187: Solar Prominence Wave
+    function(gx, gz, width, length)
+        local wave = math.sin(gx * 0.5 + tick() * 3) * 2 + (length / 2)
+        local dist = math.abs(gz - wave)
+        if dist < 1.0 then
+            return Color3.fromRGB(255, 220, 50)
+        elseif dist < 2.5 then
+            return Color3.fromRGB(255, 80, 0)
+        else
+            return Color3.fromRGB(30, 5, 0)
+        end
+    end,
+
+    -- Pattern 188: Hypnotic Tunnel Ring
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local ring = (dist - tick() * 4) % 3
+        if ring < 1.0 then
+            return Color3.fromRGB(0, 255, 200)
+        else
+            return Color3.fromRGB(20, 10, 40)
+        end
+    end,
+
+    -- Pattern 189: Thermal Imaging Flame
+    function(gx, gz, width, length)
+        local t = tick() * 3
+        local noise = math.sin(gx * 0.8 + t) + math.cos(gz * 0.8 - t)
+        local heat = math.clamp((noise + 2) / 4, 0, 1)
+        if heat > 0.75 then
+            return Color3.fromRGB(255, 255, 200)
+        elseif heat > 0.5 then
+            return Color3.fromRGB(255, 120, 0)
+        elseif heat > 0.25 then
+            return Color3.fromRGB(180, 0, 100)
+        else
+            return Color3.fromRGB(20, 0, 40)
+        end
+    end,
+
+    -- Pattern 190: Digital Beacon Radar
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        local pulse = (tick() * 5) % (width * 0.6)
+        if math.abs(dist - pulse) < 0.8 then
+            return Color3.fromRGB(255, 50, 50)
+        else
+            return Color3.fromRGB(15, 15, 20)
+        end
+    end,
+
+    -- Pattern 191: Kinetic Sound Waveform
+    function(gx, gz, width, length)
+        local amplitude = math.sin(gx * 0.6 + tick() * 6) * (length * 0.35)
+        local mid = (length - 1) / 2
+        if math.abs(gz - (mid + amplitude)) < 0.8 then
+            return Color3.fromRGB(50, 255, 150)
+        else
+            return Color3.fromRGB(10, 25, 15)
+        end
+    end,
+
+    -- Pattern 192: Cybernetic Hex Matrix
+    function(gx, gz, width, length)
+        local val = (gx * 2 + gz * 3 + math.floor(tick() * 4)) % 5
+        if val == 0 then
+            return Color3.fromRGB(0, 200, 255)
+        elseif val == 1 then
+            return Color3.fromRGB(0, 80, 160)
+        else
+            return Color3.fromRGB(5, 15, 30)
+        end
+    end,
+
+    -- Pattern 193: Expanding Diamond Shockwave
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local diamondDist = math.abs(gx - cx) + math.abs(gz - cz)
+        local wave = (tick() * 6) % (width + length)
+        if math.abs(diamondDist - wave) < 1.0 then
+            return Color3.fromRGB(255, 230, 100)
+        else
+            return Color3.fromRGB(20, 10, 5)
+        end
+    end,
+
+    -- Pattern 194: Deep Void Event Horizon
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local dist = math.sqrt((gx - cx)^2 + (gz - cz)^2)
+        if dist < 1.8 then
+            return Color3.fromRGB(0, 0, 0)
+        elseif dist < 3.2 then
+            local glow = (math.sin(tick() * 5) + 1) * 0.5
+            return Color3.fromRGB(math.floor(glow * 255), 100, 255)
+        else
+            return Color3.fromRGB(15, 5, 25)
+        end
+    end,
+
+    -- Pattern 195: Alternating Strobe Grid
+    function(gx, gz, width, length)
+        local step = math.floor(tick() * 6) % 2
+        local cell = (gx + gz) % 2
+        if cell == step then
+            return Color3.fromRGB(255, 255, 255)
+        else
+            return Color3.fromRGB(20, 20, 20)
+        end
+    end,
+
+    -- Pattern 196: Subatomic Orbit Cloud
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local t = tick() * 4
+        local x = cx + math.cos(t * 1.3) * 3
+        local z = cz + math.sin(t * 0.9) * 3
+        local dist = math.sqrt((gx - x)^2 + (gz - z)^2)
+        if dist < 1.2 then
+            return Color3.fromRGB(255, 0, 200)
+        else
+            return Color3.fromRGB(10, 5, 20)
+        end
+    end,
+
+    -- Pattern 197: Shifting Color Cascade
+    function(gx, gz, width, length)
+        local hue = ((gx * 0.1 + gz * 0.1) + tick() * 0.3) % 1
+        return Color3.fromHSV(hue, 0.85, 0.9)
+    end,
+
+    -- Pattern 198: Holographic Target Crosshair
+    function(gx, gz, width, length)
+        local cx, cz = (width - 1) / 2, (length - 1) / 2
+        local isCenter = math.abs(gx - cx) < 0.6 or math.abs(gz - cz) < 0.6
+        local ring = math.abs(math.sqrt((gx - cx)^2 + (gz - cz)^2) - 3) < 0.6
+        if isCenter and ring then
+            return Color3.fromRGB(255, 255, 255)
+        elseif isCenter or ring then
+            return Color3.fromRGB(0, 255, 100)
+        else
+            return Color3.fromRGB(5, 20, 10)
+        end
+    end,
+
+    -- Pattern 199: Bioluminescent Fluid Flow
+    function(gx, gz, width, length)
+        local t = tick() * 2
+        local flow = math.sin(gx * 0.4 + gz * 0.3 + t) + math.cos(gz * 0.5 - t)
+        local intensity = math.clamp((flow + 2) / 4, 0, 1)
+        return Color3.fromRGB(0, math.floor(intensity * 230), math.floor(intensity * 255))
+    end,
+
+    -- Pattern 200: Particle Beam Core
+    function(gx, gz, width, length)
+        local cx = (width - 1) / 2
+        local dist = math.abs(gx - cx)
+        local pulse = math.sin(gz * 0.8 - tick() * 8)
+        if dist < 0.8 then
+            return Color3.fromRGB(255, 255, 200)
+        elseif dist < 2.0 and pulse > 0 then
+            return Color3.fromRGB(255, 100, 0)
+        else
+            return Color3.fromRGB(20, 10, 10)
+        end
+    end,
+}
+
+local TOTAL_PATTERNS = #animationPatterns
+
+-- ============================================
+-- GET PATTERN COLOR
+-- ============================================
+local function getPatternColor(patternIndex, gx, gz, width, length)
+	if patternIndex < 1 or patternIndex > TOTAL_PATTERNS then
+		return Color3.fromRGB(128, 128, 128)
+	end
+	return animationPatterns[patternIndex](gx, gz, width, length)
+end
+
+-- ============================================
+-- OPTIMIZED SNAPSHOT WITH CACHING
+-- ============================================
+local function snapshotExisting(forceRefresh)
+	local currentTime = tick()
+	
+	-- Use cache if recent and not forced refresh
+	if not forceRefresh and (currentTime - lastSnapshotTime) < SNAPSHOT_CACHE_TIME then
+		return cachedExisting
+	end
+	
+	local existing = {}
+	local placedBuildings = workspace:FindFirstChild("PlacedBuildings")
+	if not placedBuildings then 
+		cachedExisting = existing
+		lastSnapshotTime = currentTime
+		return existing 
+	end
+	
+	for _, model in pairs(placedBuildings:GetChildren()) do
+		if model:IsA("Model") then
+			local owner = model:FindFirstChild("PlayerOwner")
+			if owner and owner.Value == player then
+				local pos = model:GetPivot().Position
+				local key = math.round(pos.X * 10) .. "_" .. math.round(pos.Y * 10) .. "_" .. math.round(pos.Z * 10)
+				existing[key] = true
+			end
+		end
+	end
+	
+	cachedExisting = existing
+	lastSnapshotTime = currentTime
+	return existing
+end
+
+-- ============================================
+-- PAINT FLOOR TILES (using platformKeySet which stores grid info)
+-- ============================================
+local function paintFloorTiles(patternIndex)
+	local placedBuildings = workspace:FindFirstChild("PlacedBuildings")
+	if not placedBuildings then return end
+
+	local width  = PLATFORM_WIDTH
+	local length = PLATFORM_LENGTH
+
+	for _, model in pairs(placedBuildings:GetChildren()) do
+		if model.Name == ITEM_NAME then
+			local owner = model:FindFirstChild("PlayerOwner")
+			if owner and owner.Value == player then
+				local pos = model:GetPivot().Position
+				local key = math.round(pos.X * 10) .. "_" .. math.round(pos.Y * 10) .. "_" .. math.round(pos.Z * 10)
+				local gridInfo = platformKeySet[key]
+				if gridInfo then
+					local color = getPatternColor(patternIndex, gridInfo.gx, gridInfo.gz, width, length)
+					pcall(function()
+						paintRemote:FireServer(model, color)
+					end)
+				end
+			end
+		end
+	end
+end
+
+-- ============================================
+-- DUAL-TIMER SYNC HANDLER (Only used when manual mode is OFF)
+-- ============================================
+local function onAnimTimerFired(whichTimer)
+	if not isAnimEnabled or isManualAnimMode then return end
+
+	task.spawn(function()
+		paintFloorTiles(currentPattern)
+	end)
+
+	if whichTimer == "V3" then
+		v3Fired = true
+	elseif whichTimer == "V4" then
+		v4Fired = true
+	end
+
+	if v3Fired and v4Fired then
+		v3Fired = false
+		v4Fired = false
+		currentPattern = (currentPattern % TOTAL_PATTERNS) + 1
+	end
+end
+
+-- ============================================
+-- GUI (Rest of the GUI code remains the same)
+-- ============================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TimerDetectorGUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Name = "MainFrame"
+frame.Size = UDim2.new(0, 200, 0, 360) -- Main Frame
+frame.Position = UDim2.new(0, 20, 0.5, -80)
+frame.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = screenGui
+
+local frameCorner = Instance.new("UICorner")
+frameCorner.CornerRadius = UDim.new(0, 10)
+frameCorner.Parent = frame
+
+local frameStroke = Instance.new("UIStroke")
+frameStroke.Color = Color3.fromRGB(80, 60, 120)
+frameStroke.Thickness = 1.5
+frameStroke.Parent = frame
+
+local accentBar = Instance.new("Frame")
+accentBar.Size = UDim2.new(1, 0, 0, 3)
+accentBar.BackgroundColor3 = Color3.fromRGB(160, 100, 255)
+accentBar.BorderSizePixel = 0
+accentBar.Parent = frame
+
+local accentGrad = Instance.new("UIGradient")
+accentGrad.Color = ColorSequence.new{
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 60, 220)),
+	ColorSequenceKeypoint.new(0.5, Color3.fromRGB(200, 120, 255)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(120, 60, 220))
+}
+accentGrad.Parent = accentBar
+
+local accentCorner = Instance.new("UICorner")
+accentCorner.CornerRadius = UDim.new(0, 10)
+accentCorner.Parent = accentBar
+
+local titleRow = Instance.new("Frame")
+titleRow.Size = UDim2.new(1, 0, 0, 28)
+titleRow.Position = UDim2.new(0, 0, 0, 3)
+titleRow.BackgroundTransparency = 1
+titleRow.Parent = frame
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Size = UDim2.new(1, -60, 1, 0)
+titleLbl.Position = UDim2.new(0, 10, 0, 0)
+titleLbl.BackgroundTransparency = 1
+titleLbl.Text = "⏱ AutoBuilder"
+titleLbl.TextColor3 = Color3.fromRGB(210, 190, 255)
+titleLbl.Font = Enum.Font.GothamBold
+titleLbl.TextSize = 12
+titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.Parent = titleRow
+
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Size = UDim2.new(0, 22, 0, 22)
+minimizeBtn.Position = UDim2.new(1, -48, 0.5, -11)
+minimizeBtn.Text = "─"
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+minimizeBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.TextSize = 12
+minimizeBtn.BorderSizePixel = 0
+minimizeBtn.Parent = titleRow
+
+local minCorner = Instance.new("UICorner")
+minCorner.CornerRadius = UDim.new(0, 6)
+minCorner.Parent = minimizeBtn
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 22, 0, 22)
+closeBtn.Position = UDim2.new(1, -26, 0.5, -11)
+closeBtn.Text = "X"
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 11
+closeBtn.BorderSizePixel = 0
+closeBtn.Parent = titleRow
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 6)
+closeCorner.Parent = closeBtn
+
+closeBtn.MouseButton1Click:Connect(function()
+	isPlaying = false
+	spawningActive = false
+	screenGui:Destroy()
+end)
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, 0, 1, -31)
+content.Position = UDim2.new(0, 0, 0, 31)
+content.BackgroundTransparency = 1
+content.Parent = frame
+
+local timerRow = Instance.new("Frame")
+timerRow.Size = UDim2.new(1, -16, 0, 32)
+timerRow.Position = UDim2.new(0, 8, 0, 2)
+timerRow.BackgroundColor3 = Color3.fromRGB(22, 18, 35)
+timerRow.BorderSizePixel = 0
+timerRow.Parent = content
+
+local timerRowCorner = Instance.new("UICorner")
+timerRowCorner.CornerRadius = UDim.new(0, 7)
+timerRowCorner.Parent = timerRow
+
+local timerRowStroke = Instance.new("UIStroke")
+timerRowStroke.Color = Color3.fromRGB(70, 50, 100)
+timerRowStroke.Thickness = 1
+timerRowStroke.Parent = timerRow
+
+local timerIcon = Instance.new("TextLabel")
+timerIcon.Size = UDim2.new(0, 20, 1, 0)
+timerIcon.Position = UDim2.new(0, 6, 0, 0)
+timerIcon.BackgroundTransparency = 1
+timerIcon.Text = "⏱"
+timerIcon.TextSize = 13
+timerIcon.Font = Enum.Font.Gotham
+timerIcon.Parent = timerRow
+
+local timerValueLabel = Instance.new("TextLabel")
+timerValueLabel.Size = UDim2.new(0, 40, 1, 0)
+timerValueLabel.Position = UDim2.new(0, 26, 0, 0)
+timerValueLabel.BackgroundTransparency = 1
+timerValueLabel.Text = "--"
+timerValueLabel.TextColor3 = Color3.fromRGB(120, 255, 180)
+timerValueLabel.Font = Enum.Font.GothamBold
+timerValueLabel.TextSize = 15
+timerValueLabel.TextXAlignment = Enum.TextXAlignment.Left
+timerValueLabel.Parent = timerRow
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -70, 1, 0)
+statusLabel.Position = UDim2.new(0, 68, 0, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Scanning..."
+statusLabel.TextColor3 = Color3.fromRGB(130, 120, 160)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 9
+statusLabel.TextXAlignment = Enum.TextXAlignment.Right
+statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+statusLabel.Parent = timerRow
+
+local btnGrid = Instance.new("Frame")
+btnGrid.Size = UDim2.new(1, -16, 0, 256)
+btnGrid.Position = UDim2.new(0, 8, 0, 40)
+btnGrid.BackgroundTransparency = 1
+btnGrid.Parent = content
+
+local function makeBtn(text, color, pos, size)
+	local btn = Instance.new("TextButton")
+	btn.Size = size or UDim2.new(0.48, 0, 0, 28)
+	btn.Position = pos
+	btn.Text = text
+	btn.BackgroundColor3 = color
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 10
+	btn.BorderSizePixel = 0
+	btn.AutoButtonColor = false
+	btn.Parent = btnGrid
+
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 7)
+	c.Parent = btn
+
+	local s = Instance.new("UIStroke")
+	s.Color = Color3.fromRGB(
+		math.max(color.R * 255 - 40, 0),
+		math.max(color.G * 255 - 40, 0),
+		math.max(color.B * 255 - 40, 0)
+	)
+	s.Thickness = 1
+	s.Parent = btn
+
+	return btn
+end
+
+local playBtn   = makeBtn("▶ PLAY",         Color3.fromRGB(50, 160, 80),   UDim2.new(0, 0, 0, 0))
+local pauseBtn  = makeBtn("⏸ PAUSE",        Color3.fromRGB(170, 130, 30),  UDim2.new(0.52, 0, 0, 0))
+local manualBtn = makeBtn("🔧 MANUAL",      Color3.fromRGB(60, 100, 180),  UDim2.new(0, 0, 0, 34), UDim2.new(1, 0, 0, 28))
+local paintBtn  = makeBtn("🎨 PAINT: ON",   Color3.fromRGB(140, 60, 170),  UDim2.new(0, 0, 0, 68), UDim2.new(1, 0, 0, 28))
+local animBtn   = makeBtn("✨ ANIM: OFF",   Color3.fromRGB(40, 40, 40),    UDim2.new(0, 0, 0, 102), UDim2.new(1, 0, 0, 28))
+
+-- NEW: Wall Selection Buttons (1ST and 2ND WALLS)
+local wall1stBtn = makeBtn("🧱 1ST WALL",  Color3.fromRGB(100, 100, 100), UDim2.new(0, 0, 0, 136), UDim2.new(0.48, 0, 0, 28))
+local wall2ndBtn = makeBtn("⬆️ 2ND WALL",  Color3.fromRGB(100, 100, 100), UDim2.new(0.52, 0, 0, 136), UDim2.new(0.48, 0, 0, 28))
+
+-- Manual Animation Panel
+local manualAnimPanel = Instance.new("Frame")
+manualAnimPanel.Size = UDim2.new(1, 0, 0, 80)
+manualAnimPanel.Position = UDim2.new(0, 0, 0, 170)
+manualAnimPanel.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
+manualAnimPanel.BorderSizePixel = 0
+manualAnimPanel.Parent = btnGrid
+
+local manualAnimCorner = Instance.new("UICorner")
+manualAnimCorner.CornerRadius = UDim.new(0, 7)
+manualAnimCorner.Parent = manualAnimPanel
+
+local manualAnimStroke = Instance.new("UIStroke")
+manualAnimStroke.Color = Color3.fromRGB(50, 40, 70)
+manualAnimStroke.Thickness = 1
+manualAnimStroke.Parent = manualAnimPanel
+
+-- Label for manual animation
+local manualAnimLabel = Instance.new("TextLabel")
+manualAnimLabel.Size = UDim2.new(1, -8, 0, 18)
+manualAnimLabel.Position = UDim2.new(0, 4, 0, 2)
+manualAnimLabel.BackgroundTransparency = 1
+manualAnimLabel.Text = "Manual Anim (1-" .. TOTAL_PATTERNS .. ")"
+manualAnimLabel.TextColor3 = Color3.fromRGB(150, 130, 180)
+manualAnimLabel.Font = Enum.Font.GothamBold
+manualAnimLabel.TextSize = 9
+manualAnimLabel.TextXAlignment = Enum.TextXAlignment.Left
+manualAnimLabel.Parent = manualAnimPanel
+
+-- TextBox for pattern input
+local manualAnimInput = Instance.new("TextBox")
+manualAnimInput.Size = UDim2.new(0.6, -4, 0, 24)
+manualAnimInput.Position = UDim2.new(0, 4, 0, 20)
+manualAnimInput.BackgroundColor3 = Color3.fromRGB(25, 20, 40)
+manualAnimInput.TextColor3 = Color3.fromRGB(220, 220, 220)
+manualAnimInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 130)
+manualAnimInput.Font = Enum.Font.Gotham
+manualAnimInput.TextSize = 11
+manualAnimInput.Text = "1"
+manualAnimInput.PlaceholderText = "Pattern #"
+manualAnimInput.BorderSizePixel = 0
+manualAnimInput.Parent = manualAnimPanel
+
+local inputCorner = Instance.new("UICorner")
+inputCorner.CornerRadius = UDim.new(0, 5)
+inputCorner.Parent = manualAnimInput
+
+-- Button for toggling manual animation mode
+local manualAnimToggle = Instance.new("TextButton")
+manualAnimToggle.Size = UDim2.new(0.38, -4, 0, 24)
+manualAnimToggle.Position = UDim2.new(0.62, 0, 0, 20)
+manualAnimToggle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+manualAnimToggle.TextColor3 = Color3.fromRGB(200, 200, 200)
+manualAnimToggle.Font = Enum.Font.GothamBold
+manualAnimToggle.TextSize = 10
+manualAnimToggle.Text = "OFF"
+manualAnimToggle.BorderSizePixel = 0
+manualAnimToggle.AutoButtonColor = false
+manualAnimToggle.Parent = manualAnimPanel
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 5)
+toggleCorner.Parent = manualAnimToggle
+
+local toggleStroke = Instance.new("UIStroke")
+toggleStroke.Color = Color3.fromRGB(50, 50, 70)
+toggleStroke.Thickness = 1
+toggleStroke.Parent = manualAnimToggle
+
+-- Return Button (◀️)
+local manualAnimReturn = Instance.new("TextButton")
+manualAnimReturn.Size = UDim2.new(0.48, -2, 0, 24)
+manualAnimReturn.Position = UDim2.new(0, 4, 0, 48)
+manualAnimReturn.BackgroundColor3 = Color3.fromRGB(60, 80, 120)
+manualAnimReturn.TextColor3 = Color3.fromRGB(220, 220, 220)
+manualAnimReturn.Font = Enum.Font.GothamBold
+manualAnimReturn.TextSize = 11
+manualAnimReturn.Text = "◀️ RETURN"
+manualAnimReturn.BorderSizePixel = 0
+manualAnimReturn.AutoButtonColor = false
+manualAnimReturn.Parent = manualAnimPanel
+
+local returnCorner = Instance.new("UICorner")
+returnCorner.CornerRadius = UDim.new(0, 5)
+returnCorner.Parent = manualAnimReturn
+
+local returnStroke = Instance.new("UIStroke")
+returnStroke.Color = Color3.fromRGB(40, 60, 90)
+returnStroke.Thickness = 1
+returnStroke.Parent = manualAnimReturn
+
+-- Next Button (▶️)
+local manualAnimNext = Instance.new("TextButton")
+manualAnimNext.Size = UDim2.new(0.48, -2, 0, 24)
+manualAnimNext.Position = UDim2.new(0.52, 0, 0, 48)
+manualAnimNext.BackgroundColor3 = Color3.fromRGB(60, 80, 120)
+manualAnimNext.TextColor3 = Color3.fromRGB(220, 220, 220)
+manualAnimNext.Font = Enum.Font.GothamBold
+manualAnimNext.TextSize = 11
+manualAnimNext.Text = "NEXT ▶️"
+manualAnimNext.BorderSizePixel = 0
+manualAnimNext.AutoButtonColor = false
+manualAnimNext.Parent = manualAnimPanel
+
+local nextCorner = Instance.new("UICorner")
+nextCorner.CornerRadius = UDim.new(0, 5)
+nextCorner.Parent = manualAnimNext
+
+local nextStroke = Instance.new("UIStroke")
+nextStroke.Color = Color3.fromRGB(40, 60, 90)
+nextStroke.Thickness = 1
+nextStroke.Parent = manualAnimNext
+
+-- Return Button Logic
+manualAnimReturn.MouseButton1Click:Connect(function()
+	if isManualAnimMode then
+		local newPattern = manualAnimPattern - 1
+		if newPattern < 1 then
+			newPattern = 1
+		end
+		manualAnimPattern = newPattern
+		manualAnimInput.Text = tostring(newPattern)
+		
+		task.spawn(function()
+			paintFloorTiles(manualAnimPattern)
+		end)
+	end
+end)
+
+-- Next Button Logic
+manualAnimNext.MouseButton1Click:Connect(function()
+	if isManualAnimMode then
+		local newPattern = manualAnimPattern + 1
+		if newPattern > TOTAL_PATTERNS then
+			newPattern = TOTAL_PATTERNS
+		end
+		manualAnimPattern = newPattern
+		manualAnimInput.Text = tostring(newPattern)
+		
+		task.spawn(function()
+			paintFloorTiles(manualAnimPattern)
+		end)
+	end
+end)
+
+-- Manual Animation Toggle Logic - PAINTS IMMEDIATELY AND DISABLES ANIM BTN
+manualAnimToggle.MouseButton1Click:Connect(function()
+	isManualAnimMode = not isManualAnimMode
+	if isManualAnimMode then
+		manualAnimToggle.Text = "ON"
+		manualAnimToggle.BackgroundColor3 = Color3.fromRGB(100, 150, 80)
+		toggleStroke.Color = Color3.fromRGB(60, 90, 40)
+		
+		-- Disable ANIM button
+		animBtn.Active = false
+		isAnimEnabled = false
+		animBtn.Text = "✨ ANIM: OFF"
+		animBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		
+		-- Paint immediately with selected pattern
+		task.spawn(function()
+			paintFloorTiles(manualAnimPattern)
+		end)
+	else
+		manualAnimToggle.Text = "OFF"
+		manualAnimToggle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		toggleStroke.Color = Color3.fromRGB(50, 50, 70)
+		
+		-- Re-enable ANIM button
+		animBtn.Active = true
+	end
+end)
+
+-- TextBox Input Validation (only numbers) - APPLIES IMMEDIATELY WHEN IN MANUAL MODE
+manualAnimInput.FocusLost:Connect(function()
+	local inputText = manualAnimInput.Text
+	local inputNum = tonumber(inputText)
+	
+	if inputNum then
+		inputNum = math.floor(inputNum)
+		if inputNum < 1 then
+			inputNum = 1
+		elseif inputNum > TOTAL_PATTERNS then
+			inputNum = TOTAL_PATTERNS
+		end
+		manualAnimPattern = inputNum
+		manualAnimInput.Text = tostring(inputNum)
+		
+		-- Apply animation immediately if manual mode is ON
+		if isManualAnimMode then
+			task.spawn(function()
+				paintFloorTiles(manualAnimPattern)
+			end)
+		end
+	else
+		manualAnimInput.Text = tostring(manualAnimPattern)
+	end
+end)
+
+local buildLabel = Instance.new("TextLabel")
+buildLabel.Size = UDim2.new(1, -16, 0, 30)
+buildLabel.Position = UDim2.new(0, 8, 0, 293)
+buildLabel.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
+buildLabel.BorderSizePixel = 0
+buildLabel.Text = "Press PLAY to enable auto-build"
+buildLabel.TextColor3 = Color3.fromRGB(120, 110, 150)
+buildLabel.Font = Enum.Font.Gotham
+buildLabel.TextSize = 9
+buildLabel.TextWrapped = true
+buildLabel.Parent = content
+
+local buildLabelCorner = Instance.new("UICorner")
+buildLabelCorner.CornerRadius = UDim.new(0, 7)
+buildLabelCorner.Parent = buildLabel
+
+local buildLabelStroke = Instance.new("UIStroke")
+buildLabelStroke.Color = Color3.fromRGB(50, 40, 70)
+buildLabelStroke.Thickness = 1
+buildLabelStroke.Parent = buildLabel
+
+-- Minimize logic
+local minimized = false
+minimizeBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	if minimized then
+		content.Visible = false
+		frame.Size = UDim2.new(0, 200, 0, 31)
+		minimizeBtn.Text = "□"
+	else
+		content.Visible = true
+		frame.Size = UDim2.new(0, 200, 0, 360) -- Minimize Here
+		minimizeBtn.Text = "─"
+	end
+end)
+
+-- ============================================
+-- WALL BUTTON LOGIC (Mutually Exclusive)
+-- ============================================
+wall1stBtn.MouseButton1Click:Connect(function()
+	if selectedWallType == "1ST" then
+		-- Deselect if already selected
+		selectedWallType = nil
+		wall1stBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+		wall1stBtn.Text = "🧱 1ST WALLS"
+		buildLabel.Text = "No wall type selected"
+		buildLabel.TextColor3 = Color3.fromRGB(120, 110, 150)
+	else
+		-- Select 1ST and deselect 2ND
+		selectedWallType = "1ST"
+		wall1stBtn.BackgroundColor3 = Color3.fromRGB(150, 120, 80)
+		wall1stBtn.Text = "🧱 1ST WALLS ✓"
+		wall2ndBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+		wall2ndBtn.Text = "⬆️ 2ND WALLS"
+		buildLabel.Text = "Selected: 1ST WALLS (Staircase)"
+		buildLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
+	end
+end)
+
+wall2ndBtn.MouseButton1Click:Connect(function()
+	if selectedWallType == "2ND" then
+		-- Deselect if already selected
+		selectedWallType = nil
+		wall2ndBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+		wall2ndBtn.Text = "⬆️ 2ND WALLS"
+		buildLabel.Text = "No wall type selected"
+		buildLabel.TextColor3 = Color3.fromRGB(120, 110, 150)
+	else
+		-- Select 2ND and deselect 1ST
+		selectedWallType = "2ND"
+		wall2ndBtn.BackgroundColor3 = Color3.fromRGB(150, 120, 80)
+		wall2ndBtn.Text = "⬆️ 2ND WALLS ✓"
+		wall1stBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+		wall1stBtn.Text = "🧱 1ST WALLS"
+		buildLabel.Text = "Selected: 2ND WALLS (Stacked)"
+		buildLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
+	end
+end)
+
+-- ============================================
+-- PLAY / STOP / PAUSE LOGIC
+-- ============================================
+local function setPlaying(state)
+	isPlaying = state
+	if isPlaying then
+		playBtn.Text = "■ STOP"
+		playBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+		buildLabel.Text = "👀 Watching for " .. TARGET_TIMER .. "..."
+		buildLabel.TextColor3 = Color3.fromRGB(100, 200, 220)
+	else
+		playBtn.Text = "▶ PLAY"
+		playBtn.BackgroundColor3 = Color3.fromRGB(50, 160, 80)
+		spawningActive = false
+		isPaused = false
+		pausedAt002 = false
+		buildResumeIndex = 1
+		pauseBtn.Text = "⏸ PAUSE"
+		pauseBtn.BackgroundColor3 = Color3.fromRGB(170, 130, 30)
+		buildLabel.Text = "Stopped."
+		buildLabel.TextColor3 = Color3.fromRGB(120, 110, 150)
+	end
+end
+
+playBtn.MouseButton1Click:Connect(function()
+	setPlaying(not isPlaying)
+end)
+
+pauseBtn.MouseButton1Click:Connect(function()
+	if not isPlaying then return end
+	isPaused = not isPaused
+	if isPaused then
+		pauseBtn.Text = "▶ RESUME"
+		pauseBtn.BackgroundColor3 = Color3.fromRGB(50, 160, 80)
+		buildLabel.Text = "⏸ Paused..."
+		buildLabel.TextColor3 = Color3.fromRGB(220, 180, 60)
+	else
+		pauseBtn.Text = "⏸ PAUSE"
+		pauseBtn.BackgroundColor3 = Color3.fromRGB(170, 130, 30)
+		buildLabel.Text = "▶ Resumed!"
+		buildLabel.TextColor3 = Color3.fromRGB(100, 200, 220)
+	end
+end)
+
+-- ============================================
+-- PAINT TOGGLE
+-- ============================================
+paintBtn.MouseButton1Click:Connect(function()
+	isPaintEnabled = not isPaintEnabled
+	if isPaintEnabled then
+		paintBtn.Text = "🎨 PAINT: ON"
+		paintBtn.BackgroundColor3 = Color3.fromRGB(140, 60, 170)
+	else
+		paintBtn.Text = "🎨 PAINT: OFF"
+		paintBtn.BackgroundColor3 = Color3.fromRGB(70, 50, 80)
+	end
+end)
+
+-- ============================================
+-- ANIMATION TOGGLE (DISABLED WHEN MANUAL MODE IS ON)
+-- ============================================
+animBtn.MouseButton1Click:Connect(function()
+	if isManualAnimMode then return end
+	
+	isAnimEnabled = not isAnimEnabled
+	if isAnimEnabled then
+		animBtn.Text = "✨ ANIM: ON"
+		animBtn.BackgroundColor3 = Color3.fromRGB(180, 140, 20)
+		v3Fired = false
+		v4Fired = false
+	else
+		animBtn.Text = "✨ ANIM: OFF"
+		animBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	end
+end)
+
+-- ============================================
+-- HELPERS
+-- ============================================
+local function shouldContinue()
+	if not spawningActive then return false end
+	while isPaused and spawningActive do task.wait(0.1) end
+	return spawningActive
+end
+
+local function posToKey(cf)
+	local pos = cf.Position
+	return math.round(pos.X * 10) .. "_" .. math.round(pos.Y * 10) .. "_" .. math.round(pos.Z * 10)
+end
+
+local function anyBlueprintBlocksExist()
+	local existing = snapshotExisting(true) -- Force refresh for accuracy
+	for _, entry in ipairs(blueprint) do
+		local key = posToKey(entry.cf)
+		if existing[key] then
+			return true
+		end
+	end
+	return false
+end
+
+-- ============================================
+-- PAINT ALL MY CONCRETE WALLS (non-floor) - DEBOUNCED
+-- ============================================
+local function paintMyConcreteWalls()
+	if not isPaintEnabled then return end
+	
+	local currentTime = tick()
+	if (currentTime - lastPaintTime) < PAINT_DEBOUNCE then
+		return
+	end
+	lastPaintTime = currentTime
+	
+	local placedBuildings = workspace:FindFirstChild("PlacedBuildings")
+	if not placedBuildings then return end
+
+	for _, v in pairs(placedBuildings:GetChildren()) do
+		if v.Name == ITEM_NAME then
+			local owner = v:FindFirstChild("PlayerOwner")
+			if owner and owner.Value == player then
+				local pos = v:GetPivot().Position
+				local key = math.round(pos.X * 10) .. "_" .. math.round(pos.Y * 10) .. "_" .. math.round(pos.Z * 10)
+				if platformKeySet[key] then
+					continue
+				end
+				pcall(function()
+					paintRemote:FireServer(v, PAINT_COLOR)
+				end)
+			end
+		end
+	end
+end
+
+-- ============================================
+-- RESET MANUAL BUTTON
+-- ============================================
+local function resetManualBtn()
+	manualBtn.Text = "🔧 MANUAL"
+	manualBtn.BackgroundColor3 = Color3.fromRGB(60, 100, 180)
+	isManualBuild = false
+end
+
+-- ============================================
+-- CORE BUILD FUNCTION - OPTIMIZED
+-- ============================================
+local function runBuild(startIndex)
+	if buildInProgress then return end
+	buildInProgress = true
+	spawningActive  = true
+	startIndex = startIndex or 1
+
+	if startIndex == 1 then
+		buildLabel.Text = "📐 Generating blueprint..."
+		buildLabel.TextColor3 = Color3.fromRGB(220, 180, 60)
+		generateBlueprint()
+		-- Force refresh snapshot after generating blueprint
+		snapshotExisting(true)
+	end
+
+	local surface = workspace:WaitForChild("Surface")
+
+	for pass = 1, 2 do
+		if not shouldContinue() then
+			buildInProgress = false
+			spawningActive = false
+			return
+		end
+
+		local loopStart = (pass == 1) and startIndex or 1
+
+		buildLabel.Text = "🛡 Pass " .. pass .. "/2..."
+		buildLabel.TextColor3 = Color3.fromRGB(220, 180, 60)
+
+		-- Snapshot ONCE per pass, not per iteration
+		local existing = snapshotExisting(true)
+		local repairedCount = 0
+		local total = #blueprint
+
+		for i = loopStart, total do
+			if not shouldContinue() then
+				buildResumeIndex = i
+				buildInProgress = false
+				spawningActive = false
+				return
+			end
+
+			local entry = blueprint[i]
+			local key = posToKey(entry.cf)
+
+			-- Only check cache, no additional workspace scans
+			if not existing[key] then
+				buildRemote:InvokeServer(entry.blockType, entry.cf, surface)
+				task.wait(Delay)
+				-- Update cache immediately after placing block
+				existing[key] = true
+				repairedCount = repairedCount + 1
+			end
+
+			if i % 10 == 0 then
+				buildLabel.Text = "🛡 Pass " .. pass .. " [" .. i .. "/" .. total .. "] +" .. repairedCount
+			end
+		end
+
+		startIndex = 1
+		if pass == 1 then task.wait(0.05) end
+	end
+
+	buildLabel.Text = "🔎 Final integrity scan..."
+	buildLabel.TextColor3 = Color3.fromRGB(160, 220, 255)
+
+	-- Force fresh snapshot for final scan
+	local finalExisting = snapshotExisting(true)
+	local finalRepaired = 0
+	local finalTotal    = #blueprint
+
+	for i, entry in ipairs(blueprint) do
+		if not spawningActive then break end
+
+		local key = posToKey(entry.cf)
+		if not finalExisting[key] then
+			buildRemote:InvokeServer(entry.blockType, entry.cf, surface)
+			task.wait(Delay)
+			-- Update cache immediately after placing block
+			finalExisting[key] = true
+			finalRepaired = finalRepaired + 1
+		end
+
+		if i % 10 == 0 then
+			buildLabel.Text = "🔎 Scan [" .. i .. "/" .. finalTotal .. "] +" .. finalRepaired
+		end
+	end
+
+	if finalRepaired > 0 then
+		buildLabel.Text = "✅ Done! Fixed " .. finalRepaired .. " hole(s)."
+	else
+		buildLabel.Text = "✅ Complete! No holes found."
+	end
+	buildLabel.TextColor3 = Color3.fromRGB(100, 220, 150)
+	buildInProgress = false
+	spawningActive  = false
+	pausedAt002 = false
+	buildResumeIndex = 1
+
+	resetManualBtn()
+
+	if isPlaying then
+		buildLabel.Text = "👀 Watching for " .. TARGET_TIMER .. "..."
+		buildLabel.TextColor3 = Color3.fromRGB(100, 200, 220)
+	end
+end
+
+-- ============================================
+-- MANUAL BUTTON
+-- ============================================
+manualBtn.MouseButton1Click:Connect(function()
+	if isManualBuild and buildInProgress then
+		spawningActive = false
+		buildInProgress = false
+		pausedAt002 = false
+		buildResumeIndex = 1
+		resetManualBtn()
+		buildLabel.Text = "🛑 Manual stopped."
+		buildLabel.TextColor3 = Color3.fromRGB(220, 80, 80)
+		return
+	end
+
+	if isManualBuild and pausedAt002 then
+		pausedAt002 = false
+		buildResumeIndex = 1
+		resetManualBtn()
+		buildLabel.Text = "🛑 Manual stopped."
+		buildLabel.TextColor3 = Color3.fromRGB(220, 80, 80)
+		return
+	end
+
+	if buildInProgress then return end
+
+	isManualBuild = true
+	pausedAt002 = false
+	buildResumeIndex = 1
+	manualBtn.Text = "🛑 STOP"
+	manualBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+
+	task.spawn(function()
+		runBuild(1)
+		resetManualBtn()
+	end)
+end)
+
+-- ============================================
+-- TIMER DETECTION
+-- ============================================
+local timerKeywords = {"timer", "time", "countdown", "clock", "round"}
+
+local function watchTimer(obj)
+	statusLabel.Text = "✅ " .. obj.Name
+	statusLabel.TextColor3 = Color3.fromRGB(100, 200, 140)
+	timerValueLabel.Text = obj.Text
+
+	obj:GetPropertyChangedSignal("Text"):Connect(function()
+		local text = obj.Text
+		timerValueLabel.Text = text
+
+		if text == PAUSE_TIMER and buildInProgress then
+			spawningActive = false
+			pausedAt002 = true
+			buildLabel.Text = "⏸ Paused at 0:02 — waiting for " .. TARGET_TIMER .. "..."
+			buildLabel.TextColor3 = Color3.fromRGB(220, 180, 60)
+		end
+
+		if text == INCREMENT_TIMER and lastIncrementText ~= INCREMENT_TIMER then
+			lastIncrementText = INCREMENT_TIMER
+			trackedX = trackedX + X_INCREMENT
+			local display = math.floor(trackedX * 100000 + 0.5) / 100000
+			buildLabel.Text = "📍 X incremented → " .. tostring(display)
+			buildLabel.TextColor3 = Color3.fromRGB(120, 200, 255)
+			task.spawn(paintMyConcreteWalls)
+		end
+		if text ~= INCREMENT_TIMER then lastIncrementText = "" end
+
+		if text == TIMERV1 and lastTimerV1Text ~= TIMERV1 then
+			lastTimerV1Text = TIMERV1
+			task.spawn(paintMyConcreteWalls)
+		end
+		if text ~= TIMERV1 then lastTimerV1Text = "" end
+
+		if text == TIMERV2 and lastTimerV2Text ~= TIMERV2 then
+			lastTimerV2Text = TIMERV2
+			task.spawn(paintMyConcreteWalls)
+		end
+		if text ~= TIMERV2 then lastTimerV2Text = "" end
+
+		if text == TIMERV3 and lastTimerV3Text ~= TIMERV3 then
+			lastTimerV3Text = TIMERV3
+			onAnimTimerFired("V3")
+		end
+		if text ~= TIMERV3 then lastTimerV3Text = "" end
+
+		if text == TIMERV4 and lastTimerV4Text ~= TIMERV4 then
+			lastTimerV4Text = TIMERV4
+			onAnimTimerFired("V4")
+		end
+		if text ~= TIMERV4 then lastTimerV4Text = "" end
+
+		if text == TARGET_TIMER and lastTriggerText ~= TARGET_TIMER then
+			lastTriggerText = TARGET_TIMER
+
+			if pausedAt002 then
+				task.spawn(function()
+					buildLabel.Text = "🔍 Checking blocks..."
+					buildLabel.TextColor3 = Color3.fromRGB(180, 180, 60)
+					task.wait(0.2)
+
+					local blocksExist = anyBlueprintBlocksExist()
+					pausedAt002 = false
+					buildResumeIndex = 1
+
+					if blocksExist then
+						buildLabel.Text = "🔄 Disaster recovery — full repair from index 1..."
+						buildLabel.TextColor3 = Color3.fromRGB(100, 200, 220)
+						task.spawn(function()
+							runBuild(1)
+							resetManualBtn()
+						end)
+					else
+						buildLabel.Text = "🔄 Blocks gone — restarting..."
+						buildLabel.TextColor3 = Color3.fromRGB(220, 120, 60)
+						task.spawn(function()
+							runBuild(1)
+							resetManualBtn()
+						end)
+					end
+				end)
+
+			elseif (isPlaying or isManualBuild) and not buildInProgress then
+				task.spawn(function()
+					runBuild(1)
+					resetManualBtn()
+				end)
+			end
+		end
+
+		if text ~= TARGET_TIMER then
+			lastTriggerText = ""
+		end
+	end)
+
+	obj.AncestryChanged:Connect(function()
+		if not obj:IsDescendantOf(game) then
+			statusLabel.Text = "⚠️ Gone"
+			statusLabel.TextColor3 = Color3.fromRGB(220, 160, 60)
+			timerValueLabel.Text = "--"
+		end
+	end)
+end
+
+local function findTimerLabel()
+	for _, obj in ipairs(playerGui:GetDescendants()) do
+		if (obj:IsA("TextLabel") or obj:IsA("TextBox")) and obj ~= timerValueLabel then
+			local nameLower = obj.Name:lower()
+			for _, keyword in ipairs(timerKeywords) do
+				if nameLower:find(keyword) then
+					return obj
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function startDetection()
+	statusLabel.Text = "Scanning..."
+	statusLabel.TextColor3 = Color3.fromRGB(130, 120, 160)
+
+	local found = findTimerLabel()
+	if found then
+		watchTimer(found)
+		return
+	end
+
+	playerGui.DescendantAdded:Connect(function(obj)
+		if obj:IsA("TextLabel") or obj:IsA("TextBox") then
+			local nameLower = obj.Name:lower()
+			for _, keyword in ipairs(timerKeywords) do
+				if nameLower:find(keyword) then
+					watchTimer(obj)
+					break
+				end
+			end
+		end
+	end)
+end
+
+task.wait(2)
+startDetection()
