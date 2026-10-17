@@ -1,0 +1,292 @@
+--!! CONFIGURATION & FRAMEWORK ISOLATION !--
+local UNIQUE_GUI_NAME = "UniqueMysteryBoxCalculatorGui"
+local CoreGui = game:GetService("CoreGui")
+
+local existingGui = CoreGui:FindFirstChild(UNIQUE_GUI_NAME)
+if existingGui then
+    existingGui:Destroy()
+end
+
+-- Services
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+
+local isMinimized = false
+local totalEarnedAttempts = 0
+local lastKnownCardCount = -1
+local cardsUsed = 0
+local attemptsUsed = 0
+
+local THEME = {
+    BG = Color3.fromRGB(20, 20, 25),
+    CARD = Color3.fromRGB(30, 30, 38),
+    ACCENT = Color3.fromRGB(255, 200, 0), -- Gold accent for mystery box / currency
+    TEXT_MAIN = Color3.fromRGB(255, 255, 255),
+    TEXT_MUTED = Color3.fromRGB(150, 150, 160),
+    DANGER = Color3.fromRGB(200, 50, 50),
+    BORDER = Color3.fromRGB(60, 60, 75)
+}
+
+local function corner(p, r)
+    local c = Instance.new("UICorner", p)
+    c.CornerRadius = UDim.new(0, r or 6)
+    return c
+end
+
+local function stroke(p, col, th)
+    local s = Instance.new("UIStroke", p)
+    s.Color = col or THEME.BORDER
+    s.Thickness = th or 1
+    return s
+end
+
+-- UI Initialization (Tiled Y-axis position 0.88 with expanded height for extra row)
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = UNIQUE_GUI_NAME
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 220, 0, 140)
+MainFrame.Position = UDim2.new(0.05, 0, 0.85, 0)
+MainFrame.BackgroundColor3 = THEME.BG
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.ClipsDescendants = false
+corner(MainFrame, 6)
+stroke(MainFrame, THEME.ACCENT, 1.2)
+
+-- Header Bar
+local HeaderBar = Instance.new("Frame", MainFrame)
+HeaderBar.Size = UDim2.new(1, 0, 0, 26)
+HeaderBar.BackgroundColor3 = THEME.CARD
+HeaderBar.BorderSizePixel = 0
+corner(HeaderBar, 6)
+
+local TitleLabel = Instance.new("TextLabel", HeaderBar)
+TitleLabel.Size = UDim2.new(1, -50, 1, 0)
+TitleLabel.Position = UDim2.new(0, 8, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Mystery Box Tracker"
+TitleLabel.Font = Enum.Font.GothamBlack
+TitleLabel.TextColor3 = THEME.ACCENT
+TitleLabel.TextSize = 12
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local CloseButton = Instance.new("TextButton", HeaderBar)
+CloseButton.Size = UDim2.new(0, 22, 0, 22)
+CloseButton.Position = UDim2.new(1, -24, 0, 2)
+CloseButton.BackgroundColor3 = THEME.DANGER
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.Text = "×"
+CloseButton.TextColor3 = THEME.TEXT_MAIN
+CloseButton.TextSize = 14
+corner(CloseButton, 4)
+
+CloseButton.MouseButton1Click:Connect(function()
+    ScreenGui:Destroy()
+end)
+
+local MinimizeButton = Instance.new("TextButton", HeaderBar)
+MinimizeButton.Size = UDim2.new(0, 22, 0, 22)
+MinimizeButton.Position = UDim2.new(1, -48, 0, 2)
+MinimizeButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+MinimizeButton.Font = Enum.Font.GothamBold
+MinimizeButton.Text = "-"
+MinimizeButton.TextColor3 = THEME.TEXT_MAIN
+MinimizeButton.TextSize = 14
+corner(MinimizeButton, 4)
+
+-- Content Holder
+local ContentHolder = Instance.new("Frame", MainFrame)
+ContentHolder.Size = UDim2.new(1, -12, 1, -34)
+ContentHolder.Position = UDim2.new(0, 6, 0, 30)
+ContentHolder.BackgroundTransparency = 1
+ContentHolder.ClipsDescendants = true
+
+MinimizeButton.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    local targetSize = isMinimized and UDim2.new(0, 220, 0, 26) or UDim2.new(0, 220, 0, 140)
+    
+    if isMinimized then
+        ContentHolder.Visible = false
+        TweenService:Create(MainFrame, TweenInfo.new(0.2), {Size = targetSize}):Play()
+    else
+        TweenService:Create(MainFrame, TweenInfo.new(0.2), {Size = targetSize}):Play()
+        task.wait(0.2)
+        if not isMinimized then
+            ContentHolder.Visible = true
+        end
+    end
+end)
+
+-- Total Attempts Row (Box + Reset Button)
+local AttemptsBox = Instance.new("TextBox", ContentHolder)
+AttemptsBox.Size = UDim2.new(1, -30, 0, 26)
+AttemptsBox.Position = UDim2.new(0, 0, 0, 0)
+AttemptsBox.BackgroundColor3 = THEME.CARD
+AttemptsBox.ClearTextOnFocus = false
+AttemptsBox.Font = Enum.Font.GothamBold
+AttemptsBox.Text = "Total Attempts: 0"
+AttemptsBox.TextColor3 = THEME.TEXT_MAIN
+AttemptsBox.TextSize = 11
+corner(AttemptsBox, 4)
+stroke(AttemptsBox, THEME.BORDER, 1)
+
+local ResetAttemptsBtn = Instance.new("TextButton", ContentHolder)
+ResetAttemptsBtn.Size = UDim2.new(0, 26, 0, 26)
+ResetAttemptsBtn.Position = UDim2.new(1, -26, 0, 0)
+ResetAttemptsBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+ResetAttemptsBtn.Font = Enum.Font.GothamBold
+ResetAttemptsBtn.Text = "🔄"
+ResetAttemptsBtn.TextColor3 = THEME.ACCENT
+ResetAttemptsBtn.TextSize = 14
+corner(ResetAttemptsBtn, 4)
+
+-- Attempts Used Row (Box + Reset Button)
+local AttemptsUsedBox = Instance.new("TextBox", ContentHolder)
+AttemptsUsedBox.Size = UDim2.new(1, -30, 0, 26)
+AttemptsUsedBox.Position = UDim2.new(0, 0, 0, 30)
+AttemptsUsedBox.BackgroundColor3 = THEME.CARD
+AttemptsUsedBox.ClearTextOnFocus = false
+AttemptsUsedBox.Font = Enum.Font.GothamBold
+AttemptsUsedBox.Text = "Attempts Used: 0"
+AttemptsUsedBox.TextColor3 = THEME.TEXT_MAIN
+AttemptsUsedBox.TextSize = 11
+corner(AttemptsUsedBox, 4)
+stroke(AttemptsUsedBox, THEME.BORDER, 1)
+
+local ResetAttemptsUsedBtn = Instance.new("TextButton", ContentHolder)
+ResetAttemptsUsedBtn.Size = UDim2.new(0, 26, 0, 26)
+ResetAttemptsUsedBtn.Position = UDim2.new(1, -26, 0, 30)
+ResetAttemptsUsedBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+ResetAttemptsUsedBtn.Font = Enum.Font.GothamBold
+ResetAttemptsUsedBtn.Text = "🔄"
+ResetAttemptsUsedBtn.TextColor3 = THEME.ACCENT
+ResetAttemptsUsedBtn.TextSize = 14
+corner(ResetAttemptsUsedBtn, 4)
+
+-- Cards Used Row (Box + Reset Button)
+local UsedBox = Instance.new("TextBox", ContentHolder)
+UsedBox.Size = UDim2.new(1, -30, 0, 26)
+UsedBox.Position = UDim2.new(0, 0, 0, 60)
+UsedBox.BackgroundColor3 = THEME.CARD
+UsedBox.ClearTextOnFocus = false
+UsedBox.Font = Enum.Font.GothamBold
+UsedBox.Text = "Cards Used: 0"
+UsedBox.TextColor3 = THEME.TEXT_MAIN
+UsedBox.TextSize = 11
+corner(UsedBox, 4)
+stroke(UsedBox, THEME.BORDER, 1)
+
+local ResetUsedBtn = Instance.new("TextButton", ContentHolder)
+ResetUsedBtn.Size = UDim2.new(0, 26, 0, 26)
+ResetUsedBtn.Position = UDim2.new(1, -26, 0, 60)
+ResetUsedBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+ResetUsedBtn.Font = Enum.Font.GothamBold
+ResetUsedBtn.Text = "🔄"
+ResetUsedBtn.TextColor3 = THEME.ACCENT
+ResetUsedBtn.TextSize = 14
+corner(ResetUsedBtn, 4)
+
+-- Status Info Label
+local StatusLabel = Instance.new("TextLabel", ContentHolder)
+StatusLabel.Size = UDim2.new(1, 0, 0, 20)
+StatusLabel.Position = UDim2.new(0, 0, 0, 90)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Font = Enum.Font.GothamBold
+StatusLabel.Text = "Status: Scanning inventory..."
+StatusLabel.TextColor3 = THEME.TEXT_MUTED
+StatusLabel.TextSize = 10
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+ResetAttemptsBtn.MouseButton1Click:Connect(function()
+    totalEarnedAttempts = 0
+    lastKnownCardCount = -1
+    AttemptsBox.Text = "Total Attempts: 0"
+end)
+
+ResetAttemptsUsedBtn.MouseButton1Click:Connect(function()
+    attemptsUsed = 0
+    AttemptsUsedBox.Text = "Attempts Used: 0"
+end)
+
+ResetUsedBtn.MouseButton1Click:Connect(function()
+    cardsUsed = 0
+    UsedBox.Text = "Cards Used: 0"
+end)
+
+local function getSupplyCrateCardCount()
+    local count = 0
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    local backpackRoot = playerGui and playerGui:FindFirstChild("Main") 
+        and playerGui.Main:FindFirstChild("Backpack") 
+        and playerGui.Main.Backpack:FindFirstChild("Backpack")
+
+    if backpackRoot then
+        local function scanGrid(folderObject)
+            if not folderObject then return end
+            for _, slot in ipairs(folderObject:GetChildren()) do
+                if tonumber(slot.Name) and slot:IsA("ImageButton") then
+                    local itemName = slot:GetAttribute("Item")
+                    if itemName == "Supply Crate Card" then
+                        local countText = "1"
+                        local countObj = slot:FindFirstChild("Count")
+                        if countObj and countObj:IsA("TextLabel") and countObj.Visible then
+                            countText = countObj.Text
+                        end
+                        count = count + (tonumber(countText) or 1)
+                    end
+                end
+            end
+        end
+
+        scanGrid(backpackRoot:FindFirstChild("Frame"))
+        scanGrid(backpackRoot:FindFirstChild("Explorers"))
+    end
+    return count
+end
+
+-- Detection Loop
+task.spawn(function()
+    while ScreenGui.Parent do
+        task.wait(0.4)
+        local currentCards = getSupplyCrateCardCount()
+
+        if lastKnownCardCount == -1 then
+            lastKnownCardCount = currentCards
+            if currentCards > 0 then
+                totalEarnedAttempts = totalEarnedAttempts + math.floor(currentCards / 25)
+            end
+        else
+            -- Check if cards increased (gained/bought new cards)
+            if currentCards > lastKnownCardCount then
+                local diff = currentCards - lastKnownCardCount
+                local newAttempts = math.floor(diff / 25)
+                if newAttempts > 0 then
+                    totalEarnedAttempts = totalEarnedAttempts + newAttempts
+                end
+            -- Check if cards decreased (spent cards)
+            elseif currentCards < lastKnownCardCount then
+                local diff = lastKnownCardCount - currentCards
+                cardsUsed = cardsUsed + diff
+                
+                -- Calculate how many attempts worth of cards were spent
+                local spentAttempts = math.floor(diff / 25)
+                if spentAttempts > 0 then
+                    attemptsUsed = attemptsUsed + spentAttempts
+                end
+            end
+            lastKnownCardCount = currentCards
+        end
+
+        local remainingAttempts = math.max(0, totalEarnedAttempts - attemptsUsed)
+
+        AttemptsBox.Text = string.format("Total Attempts: %d", totalEarnedAttempts)
+        AttemptsUsedBox.Text = string.format("Attempts Used: %d", attemptsUsed)
+        UsedBox.Text = string.format("Cards Used: %d", cardsUsed)
+        StatusLabel.Text = string.format("Cards: %d | Left: %d", currentCards, remainingAttempts)
+    end
+end)
